@@ -47,6 +47,9 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
   Verified against the implementation and pinned by `tests/test_protocol.py`.
 - README restructured with badges, a banner, and `Acknowledgements` / `Contributing`
   sections; the technical content is the same.
+- README Acknowledgements (and matching notes in `neo`, `CONTRIBUTING.md`, and
+  `docs/engineering-notes.md`) now record that `neo` and this repository were written
+  with substantial AI assistance under human direction.
 
 ### Fixed
 
