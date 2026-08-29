@@ -1,0 +1,21 @@
+# Consistent whitespace for everyone editing this repo — editors that ship with
+# editorconfig support read this; the launcher itself follows the same rules.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{md,yml,yaml}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[*.{png,jpg,jpeg,gif,ico}]
+insert_final_newline = unset
+trim_trailing_whitespace = unset

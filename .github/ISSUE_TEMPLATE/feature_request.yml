@@ -1,0 +1,59 @@
+name: Feature request
+description: A command, flag, or platform improvement you would like to see
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project has two hard constraints — one stdlib-only file, and no behavior
+        beyond what the official launcher does. A proposal that fits both is easy to
+        merge; one that needs a dependency or a GUI usually is not. Knowing that up
+        front saves everyone time. See [CONTRIBUTING.md](https://github.com/Agentpuggles/Neo-Linux/blob/main/CONTRIBUTING.md#ground-rules).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is hard or impossible today?
+      description: The workflow you are trying to complete, not the solution you have in mind.
+      placeholder: |
+        I keep several builds side by side for testing, and `neo verify` always picks
+        the newest CL, so I have to re-install to check an older one.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like the command line to look like?
+      placeholder: |
+        neo verify 10.32 --only-missing
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else did you consider?
+      description: A workaround, a different flag shape, or "document it and move on".
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which part of the project does this touch?
+      options:
+        - account / auth
+        - catalog / manifest parsing
+        - downloader / cache
+        - install / verify
+        - launch / umu-run integration
+        - documentation
+        - tooling (tests, CI, lint)
+        - packaging / distribution
+    validations:
+      required: true
+  - type: checkboxes
+    id: willingness
+    attributes:
+      label: Are you willing to work on it?
+      options:
+        - label: I would like to open a PR for this (CONTRIBUTING.md covers the tests and docs expected)
+        - label: I can test a branch on my own install before it merges
+        - label: I only have the idea — fine, leave it here
