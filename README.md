@@ -45,7 +45,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 | [Documentation](#documentation) | protocol reference, engineering notes, changelog |
 | [Troubleshooting](#troubleshooting) | symptoms and fixes |
 | [Contributing](#contributing) | issues, pull requests, security reports |
-| [Acknowledgements](#acknowledgements) | the projects this stands on |
+| [Acknowledgements](#acknowledgements) | the projects this stands on, and how this was written |
 | [License](#license) | MIT |
 
 ## Status
@@ -280,6 +280,13 @@ the service, written up as a protocol note.
 | Epic's `BuildPatchServices` | the chunk and manifest formats this launcher reads, decompiled where the format was ambiguous |
 | [Cloudflare R2](https://developers.cloudflare.com/r2/) | the CDN behaviour (`403` on default user agents, transient `404`s) documented in [docs/protocol.md](docs/protocol.md#63-cdn-gotchas-cloudflare-r2) |
 | [ruff](https://docs.astral.sh/ruff/) | the single dev tool this repo needs |
+
+**Authorship.** `neo` itself, and the rest of this repository — the protocol notes, the
+engineering log, the tests, the CI, this README — were written with substantial
+assistance from AI coding agents, directed by a human who ran every live install,
+supplied the Windows binaries that had to be decompiled, and decided what counted as
+working. The agents are tools; the copyright and the judgement calls are
+[Agentpuggles](https://github.com/Agentpuggles).
 
 Fortnite is a trademark of Epic Games, Inc. NeoFN is not affiliated with this project.
 

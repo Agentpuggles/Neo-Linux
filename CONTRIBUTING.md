@@ -5,6 +5,12 @@ dependencies, no build step — and most of the difficulty is in getting the pro
 details right rather than in the code volume. Read the constraints below before you
 start and a review should be quick.
 
+`neo` and this repository were written with substantial AI assistance (see
+[README → Acknowledgements](README.md#acknowledgements)). That does not lower the bar:
+a change still has to compile, pass `make check`, keep `docs/protocol.md` honest, and
+be something the author has actually run. Generated dumps that nobody executed are not
+a contribution.
+
 ## Contents
 
 | Section | What it covers |
