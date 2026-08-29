@@ -5,6 +5,11 @@ with the reasoning that resolved each one. Written up for two reasons: the *meth
 here generalize to any reverse-engineering / interop project, and the *specifics*
 (precedent for anyone else poking at NeoFN or Epic's BuildPatchServices format).
 
+These notes were taken during the same AI-assisted sessions that produced `neo` (see
+[README → Acknowledgements](../README.md#acknowledgements)). The first-person plural is
+a human operator and the agents they were directing; the diagnoses were checked against
+production and against the decompiled client, not against a model's confidence.
+
 The recurring theme, if you want the one-paragraph version: **stop guessing, get
 ground truth** — from the decompiled binary, the wire, or the game's own logs. Every
 hard problem in this project fell within minutes of obtaining the right ground truth,
