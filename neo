@@ -20,11 +20,12 @@
 
 import argparse
 import concurrent.futures as cf
+from datetime import datetime, timedelta, timezone
 import hashlib
-import http.server
 import json
 import os
 import random
+import re
 import string
 import struct
 import subprocess
@@ -74,14 +75,16 @@ def config_path():
 def load_config():
     cfg = {"install_root": os.path.expanduser("~/Games/Neo"), "workers": 16}
     try:
-        cfg.update(json.load(open(config_path())))
+        with open(config_path()) as f:
+            cfg.update(json.load(f))
     except Exception:
         pass
     return cfg
 
 def load_state():
     try:
-        return json.load(open(os.path.join(data_dir(), "state.json")))
+        with open(os.path.join(data_dir(), "state.json")) as f:
+            return json.load(f)
     except Exception:
         return {"installs": {}}
 
@@ -142,7 +145,8 @@ class Auth:
         self.path = os.path.join(data_dir(), "auth.json")
         self.d = {}
         if os.path.exists(self.path):
-            try: self.d = json.load(open(self.path))
+            try:
+                with open(self.path) as f: self.d = json.load(f)
             except Exception: pass
 
     def save(self):
@@ -190,9 +194,8 @@ class Auth:
         exp = self.d.get("access_expires_at")
         if exp:
             try:
-                from datetime import datetime, timezone
                 if datetime.fromisoformat(exp.replace("Z", "+00:00")) - \
-                   datetime.now(timezone.utc) < __import__("datetime").timedelta(minutes=5):
+                   datetime.now(timezone.utc) < timedelta(minutes=5):
                     self.refresh()
             except Exception: pass
         return self.d["access_token"]
@@ -291,7 +294,8 @@ def load_manifest(version, manifest_path_url):
     cache = os.path.join(cache_dir(), "manifests",
                          version.replace("/", "_") + ".json")
     if os.path.exists(cache):
-        return Manifest(json.load(open(cache, encoding="utf-8")))
+        with open(cache, encoding="utf-8") as f:
+            return Manifest(json.load(f))
     status, raw = http("GET", manifest_path_url, timeout=300, retries=3)
     if status != 200:
         raise RuntimeError(f"manifest download HTTP {status}")
@@ -327,7 +331,7 @@ class Progress:
 
 def parse_chunk(raw):
     if len(raw) < CHUNK_HEADER_V2: raise ValueError("chunk too small")
-    magic, ver, hsize, dsize = struct.unpack_from("<IIII", raw, 0)
+    magic, _ver, hsize, _dsize = struct.unpack_from("<IIII", raw, 0)
     if magic != CHUNK_MAGIC: raise ValueError("bad chunk magic")
     # layout: magic4 ver4 hsize4 dsize4 | guid16 | rollingHash8 | storedAs1 | sha1 20 | hashType1 (v2, 62B)
     stored_as = raw[40]
@@ -340,7 +344,7 @@ def fetch_chunk(cloud, manifest, guid, sem_stats):
     """download (or reuse cached) chunk; returns uncompressed bytes."""
     cache_file = os.path.join(cache_dir(), "chunks", guid)
     if os.path.exists(cache_file):
-        raw = open(cache_file, "rb").read()
+        with open(cache_file, "rb") as f: raw = f.read()
         try:
             data, sha = parse_chunk(raw)
             if sha == manifest.chunks.get(guid, {}).get("sha1"):
@@ -434,7 +438,7 @@ def cmd_install(args, auth):
     print("Assembling files…")
     bad = []
     with Progress(len(m.files), "files", counts=True) as pr:
-        for i, f in enumerate(m.files):
+        for f in m.files:
             try:
                 assemble_file(inst_dir, f, chunk_cache, cloud, m)
             except Exception as e:
@@ -459,8 +463,21 @@ def cmd_install(args, auth):
         print(f"  purged {purged} cached chunks (keep with --keep-cache)")
     ok(f"Installed {version} → {inst_dir}")
 
+def install_path(inst_dir, name):
+    """Resolve a manifest-supplied filename inside `inst_dir`.
+
+    File names come off the CDN, so refuse anything that walks out of the install
+    directory ("../../x", "/etc/x") instead of writing it. Symlinks inside the build
+    are still honoured — they are just created at this validated destination.
+    """
+    root = os.path.normpath(inst_dir)
+    dest = os.path.normpath(os.path.join(root, name))
+    if dest != root and not dest.startswith(root + os.sep):
+        raise RuntimeError(f"unsafe filename in manifest (outside {root}): {name!r}")
+    return dest
+
 def assemble_file(inst_dir, f, chunk_cache, cloud, m):
-    dest = os.path.join(inst_dir, f["name"])
+    dest = install_path(inst_dir, f["name"])
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     if f["symlink"]:
         if os.path.lexists(dest): os.remove(dest)
@@ -471,8 +488,8 @@ def assemble_file(inst_dir, f, chunk_cache, cloud, m):
         for guid, off, size in f["parts"]:
             data = chunk_cache.get(guid)
             if data is None:
-                data, _ = parse_chunk(open(os.path.join(
-                    cache_dir(), "chunks", guid), "rb").read())
+                with open(os.path.join(cache_dir(), "chunks", guid), "rb") as fh:
+                    data, _ = parse_chunk(fh.read())
             out.write(data[off:off + size])
             h.update(data[off:off + size])
     if f["sha1"] and h.hexdigest() != f["sha1"]:
@@ -485,7 +502,8 @@ def cmd_verify(args, auth):
     st = load_state()
     version, inst = select_install(args.version, st)
     print(f"Verifying {version} at {inst['path']}")
-    m = Manifest(json.load(open(os.path.join(inst["path"], ".neo-manifest.json"))))
+    with open(os.path.join(inst["path"], ".neo-manifest.json")) as f:
+        m = Manifest(json.load(f))
     bad = missing = 0
     with Progress(len(m.files), "files") as pr:
         for f in m.files:
@@ -505,24 +523,40 @@ def cmd_verify(args, auth):
     else:
         ok("all files verified")
 
+def changelist_number(version):
+    """Build version string -> its CL number (0 when absent), for newest-wins sorting."""
+    mm = re.search(r"CL-(\d+)", version)
+    return int(mm.group(1)) if mm else 0
+
 def select_install(sel, st):
     installs = st.get("installs", {})
     if not installs: err("nothing installed yet — run: neo install"); sys.exit(1)
     if not sel or sel == "live":
-        # newest by CL number
-        def cl(v): 
-            import re
-            mm = re.search(r"CL-(\d+)", v); return int(mm.group(1)) if mm else 0
-        version = sorted(installs, key=cl)[-1]
+        version = sorted(installs, key=changelist_number)[-1]  # newest by CL number
     else:
         version = next((v for v in installs if sel in v), None)
         if not version: err(f"no install matches '{sel}'"); sys.exit(1)
     return version, installs[version]
 
 # ---------------------------------------------------------------- launch
+def to_winpath(path, prefix=None):
+    """Map a unix path into the prefix's Windows namespace.
+
+    Anything inside <prefix>/drive_c becomes C:\...; everything else is reached
+    through Wine's Z: drive. Paths inside the prefix must NOT be given as Z:
+    paths — that is what mangled -basedir (see docs/protocol.md §8.1).
+    """
+    prefix = os.environ.get("WINEPREFIX") if prefix is None else prefix
+    if prefix:
+        dc = os.path.realpath(os.path.join(prefix, "drive_c"))
+        rp = os.path.realpath(path)
+        if rp == dc or rp.startswith(dc + os.sep):
+            return "C:" + rp[len(dc):].replace(os.sep, "\\")
+    return "Z:" + path.replace("/", "\\")
+
 def cmd_launch(args, auth):
     st = load_state()
-    version, inst = select_install(args.version, st)
+    _version, inst = select_install(args.version, st)
     win64 = os.path.join(inst["path"], "FortniteGame", "Binaries", "Win64")
     if not os.path.isdir(win64):
         err(f"game binaries not found: {win64}"); sys.exit(1)
@@ -569,19 +603,10 @@ def cmd_launch(args, auth):
             err(f"prism did not provide {GAME_EXE_NAME}"); sys.exit(1)
 
     code1, exp1 = auth.exchange_code()
-    code2, exp2 = auth.exchange_code()
+    code2, _exp2 = auth.exchange_code()
     if exp1: print(f"  exchange codes valid for ~{exp1}s (game must redeem before then)")
     fltoken = "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
 
-    def to_winpath(p):
-        """map a unix path into the wine prefix's windows namespace"""
-        prefix = os.environ.get("WINEPREFIX")
-        if prefix:
-            dc = os.path.realpath(os.path.join(prefix, "drive_c"))
-            rp = os.path.realpath(p)
-            if rp == dc or rp.startswith(dc + os.sep):
-                return "C:" + rp[len(dc):].replace(os.sep, "\\")
-        return "Z:" + p.replace("/", "\\")
     basedir_win = to_winpath(win64)
     argv = [
         # bare (unquoted) basedir: through umu/wine the quotes get escaped to \"
@@ -591,7 +616,8 @@ def cmd_launch(args, auth):
         "-skippatchcheck", "-nobe", "-fromfl=eac",
         "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode",
         "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken,
-    ] + list(args.extra or [])
+        *(args.extra or []),
+    ]
 
     umu = os.environ.get("NEO_UMU", "umu-run")
     cmd = [umu] + (["--proton", args.proton] if getattr(args, "proton", None) else []) \
@@ -649,7 +675,8 @@ def cmd_login(args):
         # callback runs with no terminal (launched by the DE) — notify the user
         try:
             subprocess.run(["notify-send", "-a", "neo", "NeoFN login", msg],
-                           timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           timeout=5, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
         sys.exit(0 if auth.logged_in else 1)
@@ -661,9 +688,9 @@ def cmd_login(args):
     print("Opening browser for Discord login…")
     print("  (if it fails, open this URL manually:)")
     print(f"  {CHALLENGE}")
-    print(f"After approving, your browser will open neolauncher://callback/auth?code=…\n"
-          f"neo handles it automatically; or paste the code manually:\n"
-          f"    neo login --code <CODE>")
+    print("After approving, your browser will open neolauncher://callback/auth?code=…\n"
+          "neo handles it automatically; or paste the code manually:\n"
+          "    neo login --code <CODE>")
     import webbrowser
     webbrowser.open(CHALLENGE)
 
@@ -720,7 +747,7 @@ def cmd_setup(args, auth):
         st = jhttp("GET", ACCOUNT + "/api/public/account/setup/status", headers=hdrs)
         print(f"setup completed : {st.get('setupCompleted')}")
         print(f"display name    : {auth.d.get('display_name') or '(none)'}")
-        print(f"set one with    : neo setup <name>")
+        print("set one with    : neo setup <name>")
         return
     avail = jhttp("GET", ACCOUNT + "/api/public/account/displayName/"
                   + urllib.parse.quote(args.name, safe="") + "/available", headers=hdrs)
