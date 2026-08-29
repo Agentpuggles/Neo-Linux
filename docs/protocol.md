@@ -223,7 +223,7 @@ Verified against `neo.parse_num`:
 | Input | Result | Why |
 | --- | --- | --- |
 | `"031"` | `31` | 3 digits → treated as a plain group number |
-| `"00000000063"` | `63` | 11 digits → blob, 3 bytes LE |
+| `"00000000063"` | `63` | 11 digits, not a multiple of 3 → plain int |
 | `"000001"` | `256` | 6 digits → blob, 2 bytes LE |
 | `63` (int) | `63` | already numeric |
 | `"1048576"` | `1048576` | 7 digits, not a multiple of 3 → plain |

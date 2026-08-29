@@ -13,6 +13,28 @@ and every long detour was a period of working from assumptions instead.
 Release-by-release summary: [CHANGELOG.md](../CHANGELOG.md).
 Wire formats referenced below: [protocol.md](protocol.md).
 
+## Contents
+
+Fifteen notes, each one a failure that cost real time, the diagnosis that ended it, and the line of `neo` or of the docs it turned into. Reading order does not matter; § links below jump to the note.
+
+| § | Note | What it taught us |
+| --- | --- | --- |
+| 1 | [1. The launcher wouldn't run under Wine at all — pivot](#1-the-launcher-wouldnt-run-under-wine-at-all--pivot) | emulating a WinUI3 GUI is harder than replacing the logic under it |
+| 2 | [2. The chunk-URL guessing marathon](#2-the-chunk-url-guessing-marathon) | never guess a CDN layout with no listing — read the shipped DLL |
+| 3 | [3. Manifest numerics: the fixed-width decimal "blob" trap](#3-manifest-numerics-the-fixed-width-decimal-blob-trap) | length decides blob vs plain int; `int()` on the wrong one corrupts silently |
+| 4 | [4. The 404 that wasn't (misdiagnosed our own bug as CDN flakiness)](#4-the-404-that-wasnt-misdiagnosed-our-own-bug-as-cdn-flakiness) | suspect your own parser before blaming the network |
+| 5 | [5. Structural edit corrupted the script (duplicate tail)](#5-structural-edit-corrupted-the-script-duplicate-tail) | a bad copy/paste tail is real: compile and diff after every structural edit |
+| 6 | [6. Login, part 1: the case-sensitive route that returned 500](#6-login-part-1-the-case-sensitive-route-that-returned-500) | a 500 can be a case-sensitive route, not an outage |
+| 7 | [7. Login, part 2: the placeholder code](#7-login-part-2-the-placeholder-code) | reject placeholder input and tell the user where the real value lives |
+| 8 | [8. Login, part 3: the field named like the grant type](#8-login-part-3-the-field-named-like-the-grant-type) | the field was named after the grant type: `authorization_code` |
+| 9 | [9. The full root filesystem (cache location defaults)](#9-the-full-root-filesystem-cache-location-defaults) | a default that fills `/` is a bug, not a footgun |
+| 10 | [10. The Ctrl-C fire drill](#10-the-ctrl-c-fire-drill) | atomic tmp+rename writes make an instant exit safe |
+| 11 | [11. "Failed to open descriptor file" — quoting through the Wine boundary](#11-failed-to-open-descriptor-file--quoting-through-the-wine-boundary) | quotes are re-escaped crossing the Wine boundary — pass the path bare |
+| 12 | [12. The email/password screen that wasn't a login failure](#12-the-emailpassword-screen-that-wasnt-a-login-failure) | an in-game login screen meant a missing entitlement, not a bad token |
+| 13 | [13. Corrections and follow-ups](#13-corrections-and-follow-ups) | the ledger of what we got wrong, kept in the open |
+| — | [Validated results (for the record)](#validated-results-for-the-record) | the measured numbers, on the hardware this was built against |
+| — | [Appendix: environment quirks that shaped the work](#appendix-environment-quirks-that-shaped-the-work) | the small, real gotchas that cost hours |
+
 ---
 
 ## 1. The launcher wouldn't run under Wine at all — pivot

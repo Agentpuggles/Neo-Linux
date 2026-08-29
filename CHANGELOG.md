@@ -1,7 +1,57 @@
 # Changelog
 
-All notable changes to neo are documented here.
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
+All notable changes to `neo` are documented here, newest first. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the version numbers follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) with `0.x` meaning
+"works, but the interfaces may still move".
+
+> No git tags exist yet, so release headings are text rather than links to a diff.
+> Once releases are tagged, add a `[X.Y.Z]: …/compare/vPREV...vX.Y.Z` definition per
+> entry (see [CONTRIBUTING.md → Releasing](CONTRIBUTING.md#releasing)).
+
+## [Unreleased]
+
+Repository hygiene and a test suite; nothing here changes how the launcher talks to
+the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
+
+### Added
+
+- Offline unit test suite (`tests/`, stdlib `unittest`, no network, no writes to a
+  real `~/.local/share/neo`): manifest numerics, chunk header and CDN round-trip,
+  install assembly, auth request shapes, CLI exit codes — plus `tests/test_docs.py`,
+  which fails CI on broken links/anchors, a Contents table that misses a section, or a
+  version that disagrees between `neo --version`, README and this file.
+- CI (`.github/workflows/ci.yml`): `ruff check` over `neo` and `tests/`, a Python
+  3.9 → 3.14 test matrix, an executable-bit guard, and a docs job. `make check` runs
+  the same three things locally.
+- `install_path()` — a manifest-supplied file name can no longer write outside the
+  install directory (`../` and absolute paths are rejected at assembly time).
+- `CONTRIBUTING.md` (design constraints, how to add a command, what to test, release
+  checklist), `SECURITY.md` (private reporting, scope, what the public OAuth client
+  credentials are and are not), `CODE_OF_CONDUCT.md`, issue forms for bugs and feature
+  requests, a pull-request template, and `.github/dependabot.yml` for the actions.
+- `Makefile` (`help`, `check`, `lint`, `format`, `test`, `smoke`, `dev`, `install`),
+  `ruff.toml`, `.editorconfig`, `.gitattributes`.
+- README header artwork and a repository social-preview image (`docs/assets/`).
+
+### Changed
+
+- `neo`: `to_winpath()` and `changelist_number()` are module-level functions instead of
+  nested closures — they carry real bug-fix logic (see below) and are now unit-tested.
+  Behaviour is unchanged.
+- `neo`: `datetime`/`re` imported once at module level instead of inline, and every
+  config/session/manifest read goes through a context manager so file handles are not
+  left open across a 411-file install.
+- `docs/protocol.md` §5.1: corrected the `"00000000063"` row — 11 digits is *not* a
+  multiple of 3, so `parse_num` reads it as a plain int rather than a 3-byte blob.
+  Verified against the implementation and pinned by `tests/test_protocol.py`.
+- README restructured with badges, a banner, and `Acknowledgements` / `Contributing`
+  sections; the technical content is the same.
+
+### Fixed
+
+- The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
+  existed (no tags in this repository).
 
 ## [0.2.0] — 2026-08-29
 
@@ -65,6 +115,8 @@ Internal first cut; never released, so no tag or diff exists for it.
 - `neo launch` cannot pass extra UE4 command-line arguments. The `extra` positional
   exists, but argparse rejects flag-shaped tokens after the subcommand, so
   `neo launch 10.40 -windowed` exits 2 with `unrecognized arguments`. `--dry-run` and
-  `--proton` are unaffected.
-
-[0.2.0]: https://github.com/Agentpuggles/Neo-Linux/compare/v0.1.0...v0.2.0
+  `--proton` are unaffected. Pinned by `tests/test_cli.py::TestKnownLimitations` so the
+  changelog cannot quietly drift away from the code.
+- Playing still depends on NeoFN granting the `PLAY` entitlement; `neo launch` boots the
+  client and logs it in, but the game stops at the entitlement check
+  ([README → Status](README.md#status)).

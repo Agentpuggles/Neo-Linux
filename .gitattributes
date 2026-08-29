@@ -1,0 +1,19 @@
+# Line endings and diff/text handling. The launcher is a single extension-less
+# executable, so nothing about it can be inferred from a suffix.
+* text=auto eol=lf
+
+neo text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+Makefile text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+
+# Prose is reviewable but should not decide the repository's language statistics:
+# `neo` is the only code here, and it is Python.
+*.md linguist-documentation
+docs/** linguist-documentation
