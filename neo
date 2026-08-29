@@ -1,0 +1,782 @@
+#!/usr/bin/env python3
+# neo — a native Linux launcher for NeoFN (neofn.dev)
+#
+# Reconstructed from NeoLauncher 1.0.7 (WinUI3) + BuildPatchServices.
+# Python 3.9+ stdlib only. Game runs through umu-run/Proton.
+#
+# Commands:
+#   neo login                 Discord login (browser; neolauncher:// handler)
+#   neo whoami / logout       account info / drop session
+#   neo setup [name]          first-run display name
+#   neo status                service status + ban/access checks + online counts
+#   neo list                  available builds
+#   neo config [k] [v]        settings: install_root, cache_dir, workers
+#   neo install [ver]         install a build (default: live)   -d DIR -j N
+#   neo verify [ver]          verify installed files (sha1)
+#   neo launch [ver] [-- args...]  run the game via umu-run
+#
+# Env: NEO_HOME (data dir override), NEO_UMU (umu-run command, default "umu-run"),
+#      WINEPREFIX (honored by umu-run).
+
+import argparse
+import concurrent.futures as cf
+import hashlib
+import http.server
+import json
+import os
+import random
+import string
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zlib
+
+VERSION = "0.2.0"
+UA = f"neo-linux/{VERSION}"
+
+# ---------------------------------------------------------------- constants
+ACCOUNT  = "https://account-public-service-prod.neofn.dev/account"
+LAUNCHER = "https://launcher-public-service-prod06.neofn.dev/launcher"
+LIGHTSW  = "https://lightswitch-public-service-prod.neofn.dev/lightswitch"
+PRISM    = "https://prism-public-service-prod.neofn.dev/prism"
+CLIENT_ID = "8a4eeb89e05743fc9dba6fccb6766d35"
+CLIENT_SECRET = "7fe1392842624667b996d55ab5ebef03"
+REDIRECT_URI = "neolauncher://callback/auth"
+GAME_EXE_NAME = "FortniteClient-Win64-Shipping.exe"
+
+CHUNK_MAGIC = 0xB1FE3AA2
+CHUNK_HEADER_V2 = 62
+
+def data_dir():
+    root = os.environ.get("NEO_HOME") or os.path.join(
+        os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "neo")
+    for sub in ("", "prism"):
+        os.makedirs(os.path.join(root, sub), exist_ok=True)
+    return root
+
+def cache_dir():
+    """bulk cache (chunks + manifests) — can live on another filesystem."""
+    root = (os.environ.get("NEO_CACHE") or load_config().get("cache_dir")
+            or os.path.join(data_dir(), "cache"))
+    for sub in ("chunks", "manifests"):
+        os.makedirs(os.path.join(root, sub), exist_ok=True)
+    return root
+
+def config_path():
+    cfg_root = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(cfg_root, "neo", "config.json")
+
+def load_config():
+    cfg = {"install_root": os.path.expanduser("~/Games/Neo"), "workers": 16}
+    try:
+        cfg.update(json.load(open(config_path())))
+    except Exception:
+        pass
+    return cfg
+
+def load_state():
+    try:
+        return json.load(open(os.path.join(data_dir(), "state.json")))
+    except Exception:
+        return {"installs": {}}
+
+def save_state(st):
+    p = os.path.join(data_dir(), "state.json")
+    with open(p + ".tmp", "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(p + ".tmp", p)
+
+# ---------------------------------------------------------------- console
+def C(code, s): return f"\033[{code}m{s}\033[0m"
+def ok(s):   print(C("32", "✔ ") + s)
+def warn(s): print(C("33", "⚠ ") + s)
+def err(s):  print(C("31", "✖ ") + s, file=sys.stderr)
+def human(n):
+    for u in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or u == "TiB": return f"{n:.1f} {u}" if u != "B" else f"{int(n)} B"
+        n /= 1024
+
+# ---------------------------------------------------------------- http
+def http(method, url, body=None, headers=None, timeout=60, retries=3):
+    hdrs = {"User-Agent": UA}
+    if headers: hdrs.update(headers)
+    data = None
+    if body is not None:
+        if isinstance(body, (bytes, bytearray)):
+            data = bytes(body)  # pre-encoded (e.g. JSON) — caller sets Content-Type
+        else:
+            data = urllib.parse.urlencode(body).encode()
+            hdrs.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"{method} {url} failed: {last}")
+
+def jhttp(method, url, body=None, headers=None, timeout=60):
+    status, raw = http(method, url, body, headers, timeout)
+    if status >= 400:
+        raise RuntimeError(f"{method} {url} -> HTTP {status}: {raw[:200].decode('utf-8','replace')}")
+    return json.loads(raw or b"{}")
+
+def basic_auth():
+    import base64
+    return {"Authorization": "Basic " + base64.b64encode(
+        f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()}
+
+# ---------------------------------------------------------------- auth
+class Auth:
+    def __init__(self):
+        self.path = os.path.join(data_dir(), "auth.json")
+        self.d = {}
+        if os.path.exists(self.path):
+            try: self.d = json.load(open(self.path))
+            except Exception: pass
+
+    def save(self):
+        with open(self.path + ".tmp", "w") as f: json.dump(self.d, f, indent=1)
+        os.replace(self.path + ".tmp", self.path)
+        os.chmod(self.path, 0o600)
+
+    @property
+    def logged_in(self): return bool(self.d.get("refresh_token"))
+
+    def _token(self, body):
+        return jhttp("POST", ACCOUNT + "/api/oauth/token", body, basic_auth())
+
+    def client_credentials(self):
+        return self._token({"grant_type": "client_credentials"})
+
+    def login_code(self, code):
+        # NB: NeoFN's token endpoint wants the code in the "authorization_code"
+        # field (per decompiled OAuthTokenRequest), NOT OAuth-standard "code"
+        r = self._token({"grant_type": "authorization_code",
+                         "authorization_code": code})
+        self._store(r, kill_others=True)
+
+    def refresh(self):
+        r = self._token({"grant_type": "refresh_token",
+                         "refresh_token": self.d["refresh_token"]})
+        self._store(r, kill_others=False)
+
+    def _store(self, r, kill_others):
+        self.d = {
+            "account_id": r["account_id"], "display_name": r.get("display_name", ""),
+            "access_token": r["access_token"],
+            "access_expires_at": r.get("expires_at"),
+            "refresh_token": r["refresh_token"],
+            "refresh_expires_at": r.get("refresh_expires_at"),
+        }
+        self.save()
+        if kill_others:
+            try: http("DELETE", ACCOUNT + "/api/oauth/sessions/kill?killType=OTHERS_ACCOUNT_CLIENT",
+                      headers={"Authorization": "Bearer " + r["access_token"]})
+            except Exception: pass
+
+    def access(self):
+        if not self.logged_in: err("Not logged in. Run: neo login"); sys.exit(1)
+        exp = self.d.get("access_expires_at")
+        if exp:
+            try:
+                from datetime import datetime, timezone
+                if datetime.fromisoformat(exp.replace("Z", "+00:00")) - \
+                   datetime.now(timezone.utc) < __import__("datetime").timedelta(minutes=5):
+                    self.refresh()
+            except Exception: pass
+        return self.d["access_token"]
+
+    def exchange_code(self):
+        r = jhttp("GET", ACCOUNT + "/api/oauth/exchange",
+                  headers={"Authorization": "Bearer " + self.access()})
+        return r["code"], r.get("expiresInSeconds") or r.get("expires_in_seconds")
+
+    def logout(self):
+        self.d = {}
+        self.save()
+
+# ---------------------------------------------------------------- api
+def get_builds(auth):
+    r = auth.client_credentials()
+    return jhttp("GET", LAUNCHER + "/api/public/builds",
+                 headers={"Authorization": "Bearer " + r["access_token"]})
+
+def get_distribution_points():
+    r = jhttp("GET", LAUNCHER + "/api/public/distributionpoints")
+    return [d.rstrip("/") for d in r.get("distributions", [])]
+
+def lightswitch(auth):
+    r = auth.client_credentials()
+    return jhttp("GET", LIGHTSW + "/api/service/fortnite/status",
+                 headers={"Authorization": "Bearer " + r["access_token"]})
+
+def prism_assets(auth):
+    return jhttp("GET", PRISM + "/api/assets",
+                 headers={"Authorization": "Bearer " + auth.access()})
+
+def prism_ban(auth):
+    return jhttp("GET", PRISM + "/api/v1/ban-status",
+                 headers={"Authorization": "Bearer " + auth.access()})
+
+# ---------------------------------------------------------------- manifest
+def blob_to_bytes(s):
+    return bytes(int(s[i*3:(i+1)*3]) for i in range(len(s)//3))
+
+def parse_num(s):
+    """fixed-width padded decimal blob OR plain int, little-endian."""
+    if not isinstance(s, str): return int(s)
+    if len(s) % 3 == 0 and s.isdigit() and len(s) >= 3:
+        # ambiguous: 3-digit "031" is a plain group number, not blob of 1 byte(3=3*1 ok!)
+        return int.from_bytes(blob_to_bytes(s), "little") if len(s) > 3 else int(s)
+    try: return int(s)
+    except ValueError: return 0
+
+def parse_hash_hex(s):
+    if not isinstance(s, str): return ""
+    s = s.strip()
+    if len(s) == 60 and s.isdigit(): return blob_to_bytes(s).hex()
+    if s.lower().startswith("0x"): s = s[2:]
+    return s.lower()
+
+class Manifest:
+    def __init__(self, d):
+        self.d = d
+        fl = d.get("ManifestFileVersion", "")
+        flnum = int(fl[:3]) if isinstance(fl, str) and fl[:3].isdigit() else 0
+        self.chunk_subdir = "ChunksV3" if flnum < 15 else "ChunksV4"
+        self.chunks = {}   # guid -> {hash_u64, sha1, group, size}
+        for g, v in d.get("ChunkHashList", {}).items():
+            self.chunks.setdefault(g, {})["hash"] = int.from_bytes(blob_to_bytes(v), "little") \
+                if (isinstance(v, str) and len(v) == 24 and v.isdigit()) else int(v or 0)
+        for g, v in d.get("ChunkShaList", {}).items():
+            self.chunks.setdefault(g, {})["sha1"] = parse_hash_hex(v)
+        for g, v in d.get("DataGroupList", {}).items():
+            self.chunks.setdefault(g, {})["group"] = int(str(v).lstrip("0") or 0)
+        for g, v in d.get("ChunkFilesizeList", {}).items():
+            self.chunks.setdefault(g, {})["size"] = parse_num(v)
+        self.files = []
+        for f in d.get("FileManifestList", []):
+            parts = []
+            for p in f.get("FileChunkParts", []):
+                parts.append((p["Guid"], parse_num(p["Offset"]), parse_num(p["Size"])))
+            self.files.append({
+                "name": f["Filename"], "sha1": parse_hash_hex(f.get("FileHash", "")),
+                "parts": parts,
+                "exec": bool(f.get("bIsUnixExecutable")),
+                "symlink": f.get("SymlinkTarget") or None,
+            })
+
+    def version(self):
+        return self.d.get("BuildVersionString", "").replace("-Windows", "")
+
+    def chunk_relpath(self, guid):
+        c = self.chunks.get(guid, {})
+        if self.chunk_subdir == "ChunksV4":
+            return f"ChunksV4/{guid[:2]}/{guid}.chunk"
+        h = c.get("hash", 0); g = c.get("group", 0) % 100
+        return f"ChunksV3/{g:02d}/{h:016X}_{guid}.chunk"
+
+def load_manifest(version, manifest_path_url):
+    cache = os.path.join(cache_dir(), "manifests",
+                         version.replace("/", "_") + ".json")
+    if os.path.exists(cache):
+        return Manifest(json.load(open(cache, encoding="utf-8")))
+    status, raw = http("GET", manifest_path_url, timeout=300, retries=3)
+    if status != 200:
+        raise RuntimeError(f"manifest download HTTP {status}")
+    text = raw.decode("utf-8")
+    with open(cache, "w", encoding="utf-8") as f: f.write(text)
+    return Manifest(json.loads(text))
+
+# ---------------------------------------------------------------- chunks
+class Progress:
+    def __init__(self, total, label, counts=False):
+        self.total, self.label, self.counts = total, label, counts
+        self.done = 0; self.lock = threading.Lock(); self.t0 = time.time()
+        self._stop = False; self.thread = threading.Thread(target=self._run, daemon=True)
+    def add(self, n):
+        with self.lock: self.done += n
+    def _run(self):
+        while not self._stop:
+            time.sleep(0.5)
+            with self.lock: done = self.done
+            pct = 100.0 * done / max(self.total, 1)
+            rate = done / max(time.time() - self.t0, 0.001)
+            eta = (self.total - done) / max(rate, 0.001)
+            if self.counts:
+                shown, srate, seta = f"{int(done)}/{int(self.total)}", f"{rate:.1f} files/s", f"{eta:.0f}s"
+            else:
+                shown, srate, seta = human(done), human(rate) + "/s", f"{eta/60:.1f}min"
+            sys.stdout.write(f"\r  {self.label} {shown} ({pct:5.1f}%) {srate} ETA {seta}  ")
+            sys.stdout.flush()
+    def __enter__(self): self.thread.start(); return self
+    def __exit__(self, *a):
+        self._stop = True; self.thread.join(timeout=1)
+        sys.stdout.write("\n"); sys.stdout.flush()
+
+def parse_chunk(raw):
+    if len(raw) < CHUNK_HEADER_V2: raise ValueError("chunk too small")
+    magic, ver, hsize, dsize = struct.unpack_from("<IIII", raw, 0)
+    if magic != CHUNK_MAGIC: raise ValueError("bad chunk magic")
+    # layout: magic4 ver4 hsize4 dsize4 | guid16 | rollingHash8 | storedAs1 | sha1 20 | hashType1 (v2, 62B)
+    stored_as = raw[40]
+    sha = raw[41:61].hex()
+    payload = raw[hsize:]
+    data = zlib.decompress(payload) if stored_as & 1 else payload
+    return data, sha
+
+def fetch_chunk(cloud, manifest, guid, sem_stats):
+    """download (or reuse cached) chunk; returns uncompressed bytes."""
+    cache_file = os.path.join(cache_dir(), "chunks", guid)
+    if os.path.exists(cache_file):
+        raw = open(cache_file, "rb").read()
+        try:
+            data, sha = parse_chunk(raw)
+            if sha == manifest.chunks.get(guid, {}).get("sha1"):
+                sem_stats["reuse"] += 1
+                return data
+        except Exception:
+            pass
+    urls = [cloud + "/Builds/Fortnite/CloudDir/" + manifest.chunk_relpath(guid)]
+    if manifest.chunk_subdir != "ChunksV4":
+        urls.append(cloud + "/Builds/Fortnite/CloudDir/ChunksV4/"
+                    f"{guid[:2]}/{guid}.chunk")
+    last = None
+    for url in urls:
+        for attempt in range(4):
+            try:
+                status, raw = http("GET", url, timeout=180)
+                if status == 200:
+                    data, sha = parse_chunk(raw)
+                    want = manifest.chunks.get(guid, {}).get("sha1")
+                    if want and sha != want:
+                        raise ValueError("sha1 mismatch")
+                    tmp = cache_file + ".tmp"
+                    with open(tmp, "wb") as f: f.write(raw)
+                    os.replace(tmp, cache_file)
+                    sem_stats["dl"] += 1
+                    return data
+                last = f"HTTP {status}"
+                if status == 404 and attempt < 2:
+                    time.sleep(2 * (attempt + 1))  # R2 edge can 404 transiently
+                    continue
+                break  # hard 404 -> try next url form
+            except Exception as e:
+                last = e; time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"chunk {guid}: {last}")
+
+# ---------------------------------------------------------------- install
+def pick_build(builds, sel):
+    if not sel or sel == "live":
+        for b in builds:
+            if b.get("isLive"): return b
+        raise RuntimeError("no live build")
+    for b in builds:
+        if sel in b["version"]: return b
+    raise RuntimeError(f"no build matches '{sel}' (try: neo list)")
+
+def version_dir_name(version): return version
+
+def cmd_install(args, auth):
+    cfg = load_config()
+    builds = get_builds(auth)
+    build = pick_build(builds, args.version)
+    version = build["version"]
+    size = build["fileSizeBytes"]
+    print(f"Build: {version}  ({human(size)})")
+    clouds = get_distribution_points()
+    if not clouds: err("no distribution points"); sys.exit(1)
+    cloud = clouds[0]
+    manifest_url = cloud + "/" + build["manifestPath"].lstrip("/")
+    print("Fetching manifest…")
+    m = load_manifest(version, manifest_url)
+
+    root = os.path.abspath(os.path.expanduser(args.dir or cfg["install_root"]))
+    inst_dir = os.path.join(root, version_dir_name(version))
+    os.makedirs(inst_dir, exist_ok=True)
+    print(f"Installing to: {inst_dir}")
+
+    needed = sorted({g for f in m.files for g, _, _ in f["parts"]})
+    total = sum(m.chunks.get(g, {}).get("size", 0) for g in needed)
+    print(f"{len(m.files)} files, {len(needed)} chunks ({human(total)} download worst-case)")
+
+    stats = {"dl": 0, "reuse": 0}
+    chunk_cache = {}
+    cache_lock = threading.Lock()
+    workers = args.jobs or cfg["workers"]
+
+    def get_chunk(guid):
+        data = fetch_chunk(cloud, m, guid, stats)
+        with cache_lock:
+            if len(chunk_cache) > 96:
+                for k in list(chunk_cache)[:32]: chunk_cache.pop(k, None)
+            chunk_cache[guid] = data
+        return len(data)
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex, Progress(total, "chunks") as pr:
+        futs = {ex.submit(get_chunk, g): g for g in needed}
+        for fut in cf.as_completed(futs):
+            pr.add(m.chunks.get(futs[fut], {}).get("size", 0))
+            fut.result()
+
+    print(f"  chunks: {stats['dl']} downloaded, {stats['reuse']} reused from cache")
+    print("Assembling files…")
+    bad = []
+    with Progress(len(m.files), "files", counts=True) as pr:
+        for i, f in enumerate(m.files):
+            try:
+                assemble_file(inst_dir, f, chunk_cache, cloud, m)
+            except Exception as e:
+                bad.append((f["name"], str(e)))
+            pr.add(1)
+    # persist manifest copy + state
+    with open(os.path.join(inst_dir, ".neo-manifest.json"), "w") as fh:
+        json.dump(m.d, fh)
+    st = load_state()
+    st["installs"][version] = {"path": inst_dir, "build": build}
+    save_state(st)
+    if bad:
+        err(f"{len(bad)} file(s) failed:")
+        for n, e in bad[:10]: print(f"    {n}: {e}")
+        sys.exit(1)
+    if not getattr(args, "keep_cache", False):
+        purged = 0
+        for g in needed:
+            p = os.path.join(cache_dir(), "chunks", g)
+            try: os.remove(p); purged += 1
+            except OSError: pass
+        print(f"  purged {purged} cached chunks (keep with --keep-cache)")
+    ok(f"Installed {version} → {inst_dir}")
+
+def assemble_file(inst_dir, f, chunk_cache, cloud, m):
+    dest = os.path.join(inst_dir, f["name"])
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    if f["symlink"]:
+        if os.path.lexists(dest): os.remove(dest)
+        os.symlink(f["symlink"], dest)
+        return
+    h = hashlib.sha1()
+    with open(dest + ".tmp", "wb") as out:
+        for guid, off, size in f["parts"]:
+            data = chunk_cache.get(guid)
+            if data is None:
+                data, _ = parse_chunk(open(os.path.join(
+                    cache_dir(), "chunks", guid), "rb").read())
+            out.write(data[off:off + size])
+            h.update(data[off:off + size])
+    if f["sha1"] and h.hexdigest() != f["sha1"]:
+        os.remove(dest + ".tmp")
+        raise RuntimeError(f"sha1 mismatch (want {f['sha1'][:12]}… got {h.hexdigest()[:12]}…)")
+    os.replace(dest + ".tmp", dest)
+    if f["exec"]: os.chmod(dest, 0o755)
+
+def cmd_verify(args, auth):
+    st = load_state()
+    version, inst = select_install(args.version, st)
+    print(f"Verifying {version} at {inst['path']}")
+    m = Manifest(json.load(open(os.path.join(inst["path"], ".neo-manifest.json"))))
+    bad = missing = 0
+    with Progress(len(m.files), "files") as pr:
+        for f in m.files:
+            p = os.path.join(inst["path"], f["name"])
+            if f["symlink"]:
+                if not os.path.islink(p): missing += 1
+            elif not os.path.exists(p):
+                missing += 1
+            else:
+                h = hashlib.sha1()
+                with open(p, "rb") as fh:
+                    for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
+                if f["sha1"] and h.hexdigest() != f["sha1"]: bad += 1
+            pr.add(1)
+    if missing or bad:
+        warn(f"{missing} missing, {bad} corrupted — repair with: neo install {version}")
+    else:
+        ok("all files verified")
+
+def select_install(sel, st):
+    installs = st.get("installs", {})
+    if not installs: err("nothing installed yet — run: neo install"); sys.exit(1)
+    if not sel or sel == "live":
+        # newest by CL number
+        def cl(v): 
+            import re
+            mm = re.search(r"CL-(\d+)", v); return int(mm.group(1)) if mm else 0
+        version = sorted(installs, key=cl)[-1]
+    else:
+        version = next((v for v in installs if sel in v), None)
+        if not version: err(f"no install matches '{sel}'"); sys.exit(1)
+    return version, installs[version]
+
+# ---------------------------------------------------------------- launch
+def cmd_launch(args, auth):
+    st = load_state()
+    version, inst = select_install(args.version, st)
+    win64 = os.path.join(inst["path"], "FortniteGame", "Binaries", "Win64")
+    if not os.path.isdir(win64):
+        err(f"game binaries not found: {win64}"); sys.exit(1)
+
+    ls = lightswitch(auth)
+    if ls.get("banned"): err("banned: " + str(ls.get("banReason", ""))); sys.exit(1)
+    if ls.get("status") != "UP":
+        warn("service status: " + str(ls.get("status")) + " — " + str(ls.get("message", "")))
+    try:
+        if prism_ban(auth).get("banned"):
+            err("banned (prism): " + str(prism_ban(auth).get("reason", ""))); sys.exit(1)
+    except Exception: pass
+
+    # prism-patched client (mirror of PrismService: all assets -> prism dir;
+    # exe is required, other assets are best-effort like the Windows launcher)
+    assets = prism_assets(auth)
+    prism_dir = os.path.join(data_dir(), "prism")
+    exe = None
+    for a in assets or []:
+        dest = os.path.join(prism_dir, a["filename"])
+        try:
+            good = False
+            if os.path.exists(dest):
+                h = hashlib.sha256()
+                with open(dest, "rb") as fh:
+                    for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
+                good = h.hexdigest().lower() == a["hash256"].lower()
+            if not good:
+                print(f"  prism: {a['filename']}…")
+                status, raw = http("GET", a["url"], timeout=600)
+                if status != 200: raise RuntimeError(f"HTTP {status}")
+                if hashlib.sha256(raw).hexdigest().lower() != a["hash256"].lower():
+                    raise RuntimeError("sha256 mismatch")
+                with open(dest + ".tmp", "wb") as fh: fh.write(raw)
+                os.replace(dest + ".tmp", dest)
+            if a["filename"] == GAME_EXE_NAME: exe = dest
+        except Exception as e:
+            if a["filename"] == GAME_EXE_NAME:
+                err(f"prism exe download failed: {e}"); sys.exit(1)
+            warn(f"prism asset {a['filename']} failed ({e}) — continuing")
+    if not exe:
+        exe = os.path.join(prism_dir, GAME_EXE_NAME)
+        if not os.path.exists(exe):
+            err(f"prism did not provide {GAME_EXE_NAME}"); sys.exit(1)
+
+    code1, exp1 = auth.exchange_code()
+    code2, exp2 = auth.exchange_code()
+    if exp1: print(f"  exchange codes valid for ~{exp1}s (game must redeem before then)")
+    fltoken = "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
+
+    def to_winpath(p):
+        """map a unix path into the wine prefix's windows namespace"""
+        prefix = os.environ.get("WINEPREFIX")
+        if prefix:
+            dc = os.path.realpath(os.path.join(prefix, "drive_c"))
+            rp = os.path.realpath(p)
+            if rp == dc or rp.startswith(dc + os.sep):
+                return "C:" + rp[len(dc):].replace(os.sep, "\\")
+        return "Z:" + p.replace("/", "\\")
+    basedir_win = to_winpath(win64)
+    argv = [
+        # bare (unquoted) basedir: through umu/wine the quotes get escaped to \"
+        # and UE4's parser leaves a stray backslash, mangling the path
+        "-basedir=" + basedir_win,
+        "-epicapp=Fortnite", "-epicenv=Prod", "-epicportal",
+        "-skippatchcheck", "-nobe", "-fromfl=eac",
+        "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode",
+        "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken,
+    ] + list(args.extra or [])
+
+    umu = os.environ.get("NEO_UMU", "umu-run")
+    cmd = [umu] + (["--proton", args.proton] if getattr(args, "proton", None) else []) \
+        + [exe] + argv
+    print("Launching:", exe)
+    for a in argv:
+        shown = a if not a.startswith(("-AUTH_PASSWORD=", "-p=")) else a.split("=")[0] + "=***"
+        print("   ", shown)
+    if args.dry_run: return
+    rc = subprocess.call(cmd, cwd=win64)
+    print(f"\ngame exited: {rc}")
+
+# ---------------------------------------------------------------- login
+CHALLENGE = (ACCOUNT + "/api/oauth/challenge/Discord?"   # NB: case-sensitive route!
+             + urllib.parse.urlencode({"clientId": CLIENT_ID, "redirectUri": REDIRECT_URI}))
+
+def install_scheme_handler():
+    script = os.path.abspath(__file__)
+    entry = os.path.join(os.path.expanduser("~/.local/share/applications"),
+                         "neolauncher-callback.desktop")
+    os.makedirs(os.path.dirname(entry), exist_ok=True)
+    with open(entry, "w") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Neo Login Callback\n"
+                f"Exec=python3 {script} login --callback %u\nNoDisplay=true\n"
+                "MimeType=x-scheme-handler/neolauncher;\n")
+    try:
+        subprocess.run(["xdg-mime", "default", "neolauncher-callback.desktop",
+                        "x-scheme-handler/neolauncher"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        warn("could not auto-register neolauncher:// handler (xdg-mime missing)")
+
+def cmd_login(args):
+    auth = Auth()
+    if args.callback:
+        q = urllib.parse.urlparse(args.callback).query
+        code = urllib.parse.parse_qs(q).get("code", [None])[0]
+        if not code or code in ("…", "...", "CODE") or len(code) < 16:
+            err("that's a placeholder/truncated code, not the real one.\n"
+                "  Copy the COMPLETE neolauncher://callback/auth?code=<long-string> URL\n"
+                "  from the browser address bar (the code is ~30+ chars, no '…' in it),\n"
+                "  or just re-run: neo login  and click Authorize again for a fresh code.")
+            sys.exit(1)
+        try:
+            auth.login_code(code)
+            msg = f"Logged in as {auth.d['display_name']} ({auth.d['account_id']})"
+            ok(msg)
+        except RuntimeError as e:
+            msg = ("Login failed (code wrong, already used, or expired — "
+                   "just re-run: neo login): ") + str(e)[:160]
+            err(msg)
+        except Exception as e:
+            msg = f"Login failed: {e}"
+            err(msg)
+        # callback runs with no terminal (launched by the DE) — notify the user
+        try:
+            subprocess.run(["notify-send", "-a", "neo", "NeoFN login", msg],
+                           timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        sys.exit(0 if auth.logged_in else 1)
+    if args.code:
+        auth.login_code(args.code)
+        ok(f"logged in as {auth.d['display_name']}")
+        return
+    install_scheme_handler()
+    print("Opening browser for Discord login…")
+    print("  (if it fails, open this URL manually:)")
+    print(f"  {CHALLENGE}")
+    print(f"After approving, your browser will open neolauncher://callback/auth?code=…\n"
+          f"neo handles it automatically; or paste the code manually:\n"
+          f"    neo login --code <CODE>")
+    import webbrowser
+    webbrowser.open(CHALLENGE)
+
+def cmd_status(args, auth):
+    ls = lightswitch(auth)
+    col = C("32", "UP") if ls.get("status") == "UP" else C("31", ls.get("status", "?"))
+    print(f"Fortnite service : {col}  {ls.get('message','')}")
+    print(f"Banned           : {'yes — ' + str(ls.get('banReason')) if ls.get('banned') else 'no'}")
+    print(f"Allowed actions  : {ls.get('allowedActions') or '—'}")
+    if auth.logged_in:
+        try:
+            b = prism_ban(auth)
+            print(f"Prism ban        : {'yes — ' + str(b.get('reason')) if b.get('banned') else 'no'}")
+        except Exception as e: warn(f"prism: {e}")
+        try:
+            fa = jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"]
+                       + "/fortniteAccess", headers={"Authorization": "Bearer " + auth.access()})
+            print(f"Fortnite access  : {fa}")
+        except Exception as e: warn(f"fortniteAccess: {e}")
+    try:
+        oc = jhttp("GET", LAUNCHER + "/api/public/onlinecount")
+        print(f"Players online   : {oc}")
+    except Exception: pass
+
+def cmd_list(args, auth):
+    for b in get_builds(auth):
+        live = C("32", " [LIVE]") if b.get("isLive") else ""
+        print(f"{b['version']}{live}\n    {human(b['fileSizeBytes'])}  released {b['releaseDate']}")
+
+def cmd_whoami(args, auth):
+    if not auth.logged_in: err("not logged in"); sys.exit(1)
+    r = jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"],
+              headers={"Authorization": "Bearer " + auth.access()})
+    print(f"{r.get('displayName')}  ({r.get('id')})")
+    print(f"email: {r.get('email','—')}")
+
+def cmd_config(args):
+    cfg = load_config()
+    if args.key and args.value is not None:
+        val = int(args.value) if args.key == "workers" else args.value
+        cfg[args.key] = val
+        os.makedirs(os.path.dirname(config_path()), exist_ok=True)
+        with open(config_path(), "w") as f: json.dump(cfg, f, indent=1)
+        ok(f"{args.key} = {val}  ({config_path()})")
+    elif args.key:
+        print(f"{args.key} = {cfg.get(args.key, '(unset)')}")
+    else:
+        print(f"# {config_path()}")
+        for k, v in sorted(cfg.items()): print(f"{k} = {v}")
+
+def cmd_setup(args, auth):
+    hdrs = {"Authorization": "Bearer " + auth.access()}
+    if not args.name:
+        st = jhttp("GET", ACCOUNT + "/api/public/account/setup/status", headers=hdrs)
+        print(f"setup completed : {st.get('setupCompleted')}")
+        print(f"display name    : {auth.d.get('display_name') or '(none)'}")
+        print(f"set one with    : neo setup <name>")
+        return
+    avail = jhttp("GET", ACCOUNT + "/api/public/account/displayName/"
+                  + urllib.parse.quote(args.name, safe="") + "/available", headers=hdrs)
+    if not avail.get("available"):
+        err(f"'{args.name}' is not available — try another"); sys.exit(1)
+    status, raw = http("POST", ACCOUNT + "/api/public/account/setup",
+                       body=json.dumps({"displayName": args.name}).encode(),
+                       headers={**hdrs, "Content-Type": "application/json"})
+    if status >= 400:
+        err(f"setup failed: HTTP {status}: {raw[:200].decode('utf-8', 'replace')}"); sys.exit(1)
+    confirmed = json.loads(raw or b"{}").get("displayName", args.name)
+    auth.d["display_name"] = confirmed
+    auth.save()
+    ok(f"display name set: {confirmed}")
+
+# ---------------------------------------------------------------- main
+def main():
+    p = argparse.ArgumentParser(prog="neo", description="NeoFN Linux launcher")
+    p.add_argument("--version", action="version", version=VERSION)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("login"); s.add_argument("--code"); s.add_argument("--callback")
+    s = sub.add_parser("whoami")
+    s = sub.add_parser("setup"); s.add_argument("name", nargs="?")
+    sub.add_parser("logout")
+    sub.add_parser("status")
+    sub.add_parser("list")
+    s = sub.add_parser("config"); s.add_argument("key", nargs="?"); s.add_argument("value", nargs="?")
+    s = sub.add_parser("install"); s.add_argument("version", nargs="?")
+    s.add_argument("-d", "--dir"); s.add_argument("-j", "--jobs", type=int)
+    s.add_argument("--keep-cache", action="store_true",
+                   help="keep downloaded chunks after install (enables offline repair, uses ~build-size disk)")
+    s = sub.add_parser("verify"); s.add_argument("version", nargs="?")
+    s = sub.add_parser("launch"); s.add_argument("version", nargs="?")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--proton"); s.add_argument("extra", nargs="*")
+    args = p.parse_args()
+
+    auth = Auth()
+    if args.cmd == "login": return cmd_login(args)
+    if args.cmd == "logout": auth.logout(); return ok("logged out")
+    if args.cmd == "status": return cmd_status(args, auth)
+    if args.cmd == "list": return cmd_list(args, auth)
+    if args.cmd == "whoami": return cmd_whoami(args, auth)
+    if args.cmd == "setup": return cmd_setup(args, auth)
+    if args.cmd == "config": return cmd_config(args)
+    if args.cmd == "install": return cmd_install(args, auth)
+    if args.cmd == "verify": return cmd_verify(args, auth)
+    if args.cmd == "launch": return cmd_launch(args, auth)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        # downloads write atomically (tmp+rename) — hard exit is safe and avoids
+        # waiting on stuck worker threads at interpreter shutdown
+        print("\ninterrupted — progress is kept; re-run the same command to resume")
+        os._exit(130)
+    except RuntimeError as e:
+        err(str(e)); sys.exit(1)
