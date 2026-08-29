@@ -3,6 +3,7 @@
 #
 # Reconstructed from NeoLauncher 1.0.7 (WinUI3) + BuildPatchServices.
 # Python 3.9+ stdlib only. Game runs through umu-run/Proton.
+# Written with AI assistance under human direction (README → Acknowledgements).
 #
 # Commands:
 #   neo login                 Discord login (browser; neolauncher:// handler)
