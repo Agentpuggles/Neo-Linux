@@ -1,0 +1,35 @@
+# Ruff is the only dev tool this repo needs: `make lint` locally, CI runs the same.
+#
+# The launcher is deliberately ONE dense file — a single executable with no
+# install step and no dependencies is the product. So the compact
+# `if flag: do_thing()` style that pycodestyle calls E701/E702 is a feature here,
+# not something to reformat away; `ruff format` is therefore only checked for the
+# test suite, never for `neo`. Everything else (unused imports, bugbear,
+# simplify, pyupgrade) is enforced on all Python in the repo.
+
+line-length = 108
+target-version = "py39"
+
+[lint]
+select = [
+  "E4", "E7", "E9", "F",   # pycodestyle errors + pyflakes
+  "B",                     # bugbear: real bugs, not taste
+  "C4",                    # comprehension clarity
+  "SIM",                   # simplification
+  "UP",                    # don't regress below the supported Python floor
+  "PIE",
+  "RUF",
+]
+ignore = [
+  "E701", "E702",     # one-statement-per-line is not this file's style
+  "E731",             # small lambdas as inline helpers are fine
+  "SIM105",           # try/except/pass marks genuinely best-effort calls
+  "RUF001", "RUF002", "RUF003",   # → ✔ ⏳ § in strings and prose are intentional
+]
+
+[lint.per-file-ignores]
+# Tests use plain asserts-free unittest style fixtures and patch module globals.
+"tests/*" = ["B017"]
+
+[format]
+docstring-code-format = true
