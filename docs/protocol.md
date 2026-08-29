@@ -1,204 +1,394 @@
 # NeoFN launcher protocol reference
 
-Everything the official Windows launcher (NeoLauncher 1.0.7, WinUI3 + Epic
-BuildPatchServices) puts on the wire, reverse-engineered and **validated live**
-against production (2026-08). This is the document `neo` was built from.
+Everything the official Windows launcher (**NeoLauncher 1.0.7**, WinUI3 + Epic
+BuildPatchServices) puts on the wire — reverse-engineered from the decompiled
+binaries and **validated live against production (2026-08)**. This is the document
+[`neo`](../neo) was built from.
+
+Where a section describes a wire format, the corresponding Python implementation is
+named in its heading (e.g. `parse_num`, `parse_chunk`) so the doc and the code stay
+side by side.
+
+## Contents
+
+| § | Section | Covers |
+| --- | --- | --- |
+| 1 | [Services](#1-services) | Base URLs, OAuth client |
+| 2 | [Auth](#2-auth) | Client credentials, Discord login, session upkeep, exchange codes |
+| 3 | [Status and gates](#3-status-and-gates) | Lightswitch, ban status |
+| 4 | [Catalog and distribution points](#4-catalog-and-distribution-points) | Build list, CDN roots |
+| 5 | [Epic JSON manifest](#5-epic-json-manifest) | BuildPatchServices manifest format, decimal "blob" numerics |
+| 6 | [Chunk storage](#6-chunk-storage) | Chunk URL scheme, 62-byte file format, CDN gotchas |
+| 7 | [Prism (patched client)](#7-prism-patched-client) | Asset list, sha256 verification, exe patching |
+| 8 | [Launch recipe](#8-launch-recipe) | Exact command line, Wine/umu-run notes |
+| 9 | [In-game login flow](#9-in-game-login-flow-observed) | What happens after the exchange code |
+| 10 | [Known ambiguities](#10-known-ambiguities) | Where the format leaves room for misreads |
+
+## Gotchas at a glance
+
+| # | Gotcha | § |
+| --- | --- | --- |
+| 1 | The Discord challenge route is **case-sensitive**: `/challenge/Discord`, never `/challenge/discord` | [2.2](#22-discord-user-login) |
+| 2 | The token request field is **`authorization_code`**, not the OAuth-standard `code` | [2.2](#22-discord-user-login) |
+| 3 | Manifest numerics are **fixed-width decimal strings** — never `int()` them wholesale | [5](#5-epic-json-manifest) |
+| 4 | `DataGroupList` is a **plain int**, unlike its blob-encoded neighbours | [5](#5-epic-json-manifest) |
+| 5 | A chunk's header SHA-1 covers the **uncompressed** payload | [6.2](#62-chunk-file-format-v2-header-62-b) |
+| 6 | Trust `headerSize` over fixed offsets; v3+ headers are longer | [6.2](#62-chunk-file-format-v2-header-62-b) |
+| 7 | R2 answers **403 to python-urllib's default User-Agent** | [6.3](#63-cdn-gotchas-cloudflare-r2) |
+| 8 | The R2 edge **transiently 404s objects that exist** — retry with backoff | [6.3](#63-cdn-gotchas-cloudflare-r2) |
+| 9 | Through umu→Wine, **embedded quotes get escaped** — pass `-basedir` bare | [8.1](#81-linux-notes-umu-run--proton) |
+| 10 | An in-game login screen usually means **entitlement**, not authentication | [9](#9-in-game-login-flow-observed) |
+
+---
 
 ## 1. Services
 
-| service | base URL |
-|---|---|
+| Service | Base URL |
+| --- | --- |
 | Account | `https://account-public-service-prod.neofn.dev/account` |
 | Launcher | `https://launcher-public-service-prod06.neofn.dev/launcher` |
 | Lightswitch | `https://lightswitch-public-service-prod.neofn.dev/lightswitch` |
 | Prism | `https://prism-public-service-prod.neofn.dev/prism` |
 | Fortnite (MCP) | `https://fortnite-public-service-prod11.neofn.dev/fortnite` |
-| Content/news | `https://fortnitecontent-website-prod07.neofn.dev/content/api` |
+| Content / news | `https://fortnitecontent-website-prod07.neofn.dev/content/api` |
 | XMPP (friends) | `wss://xmpp-service-prod.neofn.dev` |
 | Content CDN | from distribution points, e.g. `https://content-cdn.neofn.dev` |
 
-OAuth client (the official launcher's own, Basic auth):
-`8a4eeb89e05743fc9dba6fccb6766d35` / `7fe1392842624667b996d55ab5ebef03`.
+OAuth client — the official launcher's own, used with HTTP Basic auth:
+
+| Field | Value |
+| --- | --- |
+| `client_id` | `8a4eeb89e05743fc9dba6fccb6766d35` |
+| `client_secret` | `7fe1392842624667b996d55ab5ebef03` |
 
 ## 2. Auth
 
 ### 2.1 Client credentials (anonymous calls)
 
-```
-POST /account/api/oauth/token      Authorization: Basic base64(id:secret)
+```http
+POST /account/api/oauth/token        Authorization: Basic base64(id:secret)
 grant_type=client_credentials
-→ { access_token, expires_in: 14400, internal_client: true, client_service: "neo" }
+```
+
+```json
+{ "access_token": "…", "expires_in": 14400,
+  "internal_client": true, "client_service": "neo" }
 ```
 
 ### 2.2 Discord user login
 
 ```
-1. Browser → GET /account/api/oauth/challenge/Discord    ← CASE-SENSITIVE route!
+1. Browser → GET /account/api/oauth/challenge/Discord      ← CASE-SENSITIVE route!
              ?clientId=<id>&redirectUri=neolauncher://callback/auth
-   ("Discord" exactly; lowercase → HTTP 500 numericErrorCode 1012)
+   ("Discord" exactly; lowercase → HTTP 500, numericErrorCode 1012)
    → 302 https://discord.com/oauth2/authorize?client_id=1514333009892081846
         &scope=identify email guilds.members.read&response_type=code
         &redirect_uri=…/account/api/internal/callback&state=<signed blob>
-2. User authorizes → backend → redirect neolauncher://callback/auth?code=<code>
-   (Linux: xdg scheme handler, or paste the URL — both built into neo)
-3. POST /account/api/oauth/token   (Basic auth)
+
+2. User authorizes → backend → neolauncher://callback/auth?code=<code>
+   (Linux: an xdg scheme handler, or paste the URL — both built into neo)
+
+3. POST /account/api/oauth/token                           (Basic auth)
    grant_type=authorization_code&authorization_code=<code>
-                                          ^^^^^^^^^^^^^^^^^^
-   ⚠️ the field is "authorization_code", NOT "code" (nonstandard; wrong field →
-   400 common.oauth.invalid_request, right field + bad value →
-   400 account.oauth.authorization_code_not_found)
-→ { access_token, refresh_token, expires_at, refresh_expires_at,
-    account_id, display_name }          (snake_case)
+                                          ^^^^^^^^^^^^^^^^^
+   ⚠️  the field is "authorization_code", NOT "code" (nonstandard).
+       wrong field → 400 common.oauth.invalid_request
+       right field, bad value → 400 account.oauth.authorization_code_not_found
 ```
 
-Refresh: `grant_type=refresh_token&refresh_token=<rt>` (refresh when < 5 min left).
-Session hygiene: `DELETE /account/api/oauth/sessions/kill?killType=OTHERS_ACCOUNT_CLIENT`.
+Response (note the snake_case keys):
 
-First-run setup: `GET api/public/account/setup/status` →
-`GET api/public/account/displayName/{name}/available` (`{available: bool}`) →
-`POST api/public/account/setup` JSON `{"displayName": "…"}` → returns the account.
-
-Profile: `GET api/public/account/{accountId}`. Play-access gate:
-`GET api/public/account/{id}/fortniteAccess`.
-
-### 2.3 Exchange codes (game auth, every launch)
-
-```
-GET /account/api/oauth/exchange      (Bearer user token)
-→ { code, expiresInSeconds }         — single use, short lived; two per launch
+```json
+{ "access_token": "…", "refresh_token": "…",
+  "expires_at": "…", "refresh_expires_at": "…",
+  "account_id": "…", "display_name": "…" }
 ```
 
-## 3. Status / gates
+### 2.3 Session upkeep
+
+| Operation | Request |
+| --- | --- |
+| Refresh | `grant_type=refresh_token&refresh_token=<rt>` — refresh when under 5 min remain |
+| Kill other sessions | `DELETE /account/api/oauth/sessions/kill?killType=OTHERS_ACCOUNT_CLIENT` |
+
+### 2.4 First-run setup
 
 ```
-GET /lightswitch/api/service/fortnite/status     (Bearer client-credentials)
-→ { serviceInstanceId: "fortnite", status: "UP", message, banned, allowedActions }
-   (lowercase "status" — not Epic's IsUp)
-
-GET /prism/api/v1/ban-status                     (Bearer user token)
-→ { banned, reason }
+GET  api/public/account/setup/status
+GET  api/public/account/displayName/{name}/available      → { available: bool }
+POST api/public/account/setup        JSON {"displayName": "…"}   → the account
 ```
 
-## 4. Catalog & content
+### 2.5 Profile and play access
 
 ```
-GET /launcher/api/public/builds                  (Bearer client-credentials)
-→ [ { version: "++Fortnite+Release-10.40-CL-9380822", fileSizeBytes,
-      releaseDate, isLive, manifestPath: "Builds/Fortnite/CloudDir/<name>.manifest" } ]
+GET api/public/account/{accountId}
+GET api/public/account/{accountId}/fortniteAccess        ← the play-access gate
+```
 
+### 2.6 Exchange codes (game auth, every launch)
+
+```http
+GET /account/api/oauth/exchange                          (Bearer user token)
+```
+
+```json
+{ "code": "…", "expiresInSeconds": 300 }
+```
+
+Single use, short lived; **two** are minted per launch.
+
+## 3. Status and gates
+
+```http
+GET /lightswitch/api/service/fortnite/status             (Bearer client credentials)
+```
+
+```json
+{ "serviceInstanceId": "fortnite", "status": "UP",
+  "message": "…", "banned": false, "allowedActions": ["…"] }
+```
+
+Lowercase `status` — not Epic's `IsUp`.
+
+```http
+GET /prism/api/v1/ban-status                             (Bearer user token)
+```
+
+```json
+{ "banned": false, "reason": null }
+```
+
+## 4. Catalog and distribution points
+
+```http
+GET /launcher/api/public/builds                          (Bearer client credentials)
+```
+
+```json
+[ { "version": "++Fortnite+Release-10.40-CL-9380822",
+    "fileSizeBytes": 0, "releaseDate": "…", "isLive": true,
+    "manifestPath": "Builds/Fortnite/CloudDir/<name>.manifest" } ]
+```
+
+```http
 GET /launcher/api/public/distributionpoints
-→ { distributions: [ "https://content-cdn.neofn.dev" ] }   (also: /releases, /onlinecount)
 ```
 
-Manifest URL: `distributions[0] + "/" + build.manifestPath`. JSON, ~20 MB for 10.40.
+```json
+{ "distributions": ["https://content-cdn.neofn.dev"] }
+```
 
-## 5. Epic JSON manifest (BuildPatchServices)
+Also available on the same service: `/releases`, `/onlinecount`.
 
-Top-level: `ManifestFileVersion`, `bIsFileData`, `FileManifestList`, `ChunkHashList`,
-`ChunkShaList`, `DataGroupList`, `ChunkFilesizeList`, `CustomFields`, `LaunchExeString`,
-`CloudDirectories`…
+The manifest URL is `distributions[0] + "/" + build.manifestPath` — JSON, roughly
+20 MB for 10.40.
 
-**⚠️ All numerics are fixed-width zero-padded decimal strings ("blobs")** — never
-`int()` them wholesale. Blob decode = 3 decimal digits per byte.
+## 5. Epic JSON manifest
 
-| field | meaning | decode |
-|---|---|---|
-| `ManifestFileVersion` | feature level, e.g. `"013000000000"` | first 3 digits = FL (13) |
-| `ChunkHashList[g]` | rolling hash | 24 digits → 8 bytes, **little-endian** u64 |
-| `ChunkShaList[g]` | SHA-1 | 60 digits → 20 bytes, as-is |
-| `DataGroupList[g]` | group number | **plain int** (not a blob) |
-| `ChunkFilesizeList[g]` | compressed size | plain int |
-| `FileChunkParts[i]` | `{Guid, Offset, Size}` | plain ints |
+Top-level keys:
 
-`FileManifestList[i]` = `{ Filename, FileHash, FileChunkParts[], bIsUnixExecutable,
-SymlinkTarget }`. Files assemble by concatenating chunk slices; empty files have zero
-parts.
+| Key | Meaning |
+| --- | --- |
+| `ManifestFileVersion` | Feature level, e.g. `"013000000000"` |
+| `bIsFileData` | Whether file payloads are in the manifest |
+| `FileManifestList` | One entry per file |
+| `ChunkHashList` | Rolling hash per chunk GUID |
+| `ChunkShaList` | SHA-1 per chunk GUID |
+| `DataGroupList` | Data group per chunk GUID |
+| `ChunkFilesizeList` | Compressed size per chunk GUID |
+| `CustomFields`, `LaunchExeString`, `CloudDirectories` | Misc |
+
+### 5.1 Numerics: fixed-width decimal "blobs"
+
+> ⚠️ **Most numerics in this format are zero-padded decimal strings, not JSON
+> numbers.** Never `int()` them wholesale. Decoding a blob = three decimal digits
+> per byte, read little-endian where the field is a multi-byte integer.
+
+| Field | Meaning | Encoding | Decode |
+| --- | --- | --- | --- |
+| `ManifestFileVersion` | Feature level | blob | first 3 digits = FL (13) |
+| `ChunkHashList[g]` | Rolling hash | blob | 24 digits → 8 bytes, **little-endian** u64 |
+| `ChunkShaList[g]` | SHA-1 | blob | 60 digits → 20 bytes, as-is |
+| `DataGroupList[g]` | Data group | **plain int** | `int(value)`, leading zeros stripped |
+| `ChunkFilesizeList[g]` | Compressed size | blob **or** plain | `neo.parse_num` accepts both |
+| `FileChunkParts[i]` | `{Guid, Offset, Size}` | blob **or** plain | `neo.parse_num` accepts both |
+
+`neo` resolves the ambiguity by length: a digit string whose length is a multiple of
+three **and greater than three** is a blob, anything else is a plain int. See
+[§10](#10-known-ambiguities) for where that heuristic can bite.
+
+Verified against `neo.parse_num`:
+
+| Input | Result | Why |
+| --- | --- | --- |
+| `"031"` | `31` | 3 digits → treated as a plain group number |
+| `"00000000063"` | `63` | 11 digits → blob, 3 bytes LE |
+| `"000001"` | `256` | 6 digits → blob, 2 bytes LE |
+| `63` (int) | `63` | already numeric |
+| `"1048576"` | `1048576` | 7 digits, not a multiple of 3 → plain |
+
+### 5.2 File manifest entries
+
+```json
+{ "Filename": "…", "FileHash": "…",
+  "FileChunkParts": [ { "Guid": "…", "Offset": "…", "Size": "…" } ],
+  "bIsUnixExecutable": false, "SymlinkTarget": null }
+```
+
+Files assemble by concatenating chunk slices in order. Empty files carry zero parts.
+`FileHash` is the SHA-1 of the assembled file; `bIsUnixExecutable` maps to mode
+`0755`; `SymlinkTarget` is honoured instead of writing a file.
 
 ## 6. Chunk storage
+
+### 6.1 Chunk URLs
 
 From `FBuildPatchAppManifest.GetDataFilename` (decompiled BuildPatchServices.dll):
 
 ```
 FL >= DataFileRenames:
-  {ChunksV2|V3|V4}/{group:D2}/{rollingHash:X16}_{GUID}.chunk
-  subdir: FL<6 ChunksV2 · FL<15 ChunksV3 · FL>=15 ChunksV4
-  group = DataGroupList value (raw; fallback crc32(guid)%100)
-  rollingHash = ChunkHashList blob decoded to u64 (LE), formatted %016X
-  GUID = 32 uppercase hex ("N" format)
+    {ChunksV2|ChunksV3|ChunksV4}/{group:02d}/{rollingHash:016X}_{GUID}.chunk
+
+    subdir        FL < 6 → ChunksV2 · FL < 15 → ChunksV3 · FL >= 15 → ChunksV4
+    group         DataGroupList value (raw; fallback crc32(guid) % 100)
+    rollingHash   ChunkHashList blob decoded to u64 (LE), formatted %016X
+    GUID          32 uppercase hex characters (the "N" format)
+
 FL < DataFileRenames:
-  Chunks/{crc32(guid)%100:D2}/{GUID}.chunk
+    Chunks/{crc32(guid) % 100:02d}/{GUID}.chunk
 ```
 
-Chunks live under `<dist>/Builds/Fortnite/CloudDir/`. FL 13 (all current builds) →
-`ChunksV3`. Example (validated):
-`…/ChunksV3/31/487A33F0F2E5F569_1832294A440167B074AC75B6A842F82A.chunk`
-
-### Chunk file format (v2 header, 62 B)
+Chunks live under `<dist>/Builds/Fortnite/CloudDir/`. Every current build is FL 13,
+i.e. `ChunksV3`. Validated example:
 
 ```
-u32 magic 0xB1FE3AA2 · u32 version · u32 headerSize(62) · u32 dataSizeCompressed
-16 B GUID (MS mixed-endian) · u64 rollingHash · u8 storedAs@40 · sha1[20]@41 ·
-u8 hashType@60 → payload at headerSize
+…/ChunksV3/31/487A33F0F2E5F569_1832294A440167B074AC75B6A842F82A.chunk
 ```
 
-- payload is a zlib stream iff `storedAs & 1`; uncompressed size = 1 MiB (v3+ headers
-  carry `dataSizeUncompressed@62` — always trust `headerSize` over fixed offsets)
-- the header SHA-1 covers the **uncompressed** payload and must equal `ChunkShaList[g]`
-- verify `rollingHash` == `ChunkHashList[g]` for extra paranoia
+`neo` tries the `ChunksV3` form first and falls back to the `ChunksV4` layout
+(`ChunksV4/{guid[:2]}/{guid}.chunk`) when the manifest's feature level disagrees
+with what the CDN actually serves.
 
-### CDN gotchas (Cloudflare R2)
+### 6.2 Chunk file format (v2 header, 62 B)
 
-- answers **403 to python-urllib's default UA** — send a custom User-Agent
-- the edge **transiently 404s existing objects** — retry with backoff
-- no bucket listing, no directory index
+```
+offset  size  field
+0       4     u32 magic          0xB1FE3AA2
+4       4     u32 version
+8       4     u32 headerSize     62 for v2
+12      4     u32 dataSizeCompressed
+16      16    GUID (MS mixed-endian)
+32      8     u64 rollingHash
+40      1     u8  storedAs
+41      20    u8[20] sha1
+60      1     u8  hashType
+62      …     payload
+```
+
+- The payload is a zlib stream **iff** `storedAs & 1`; uncompressed size is 1 MiB.
+- v3+ headers carry `dataSizeUncompressed` at offset 62 — always trust `headerSize`
+  over fixed offsets.
+- The header SHA-1 covers the **uncompressed** payload and must equal
+  `ChunkShaList[g]`.
+- For extra paranoia, also check `rollingHash` == `ChunkHashList[g]`.
+
+`neo.parse_chunk` implements exactly this layout and verifies the SHA-1 against the
+manifest before a chunk is accepted.
+
+### 6.3 CDN gotchas (Cloudflare R2)
+
+| Gotcha | Handling |
+| --- | --- |
+| **403 for python-urllib's default User-Agent** | `neo` sends `neo-linux/<version>` |
+| The edge **transiently 404s objects that exist** | retry with backoff |
+| No bucket listing, no directory index | fetch by exact object key only |
 
 ## 7. Prism (patched client)
 
+```http
+GET /prism/api/assets                                    (Bearer user token)
 ```
-GET /prism/api/assets         (Bearer user token)
-→ [ { filename, hash256, size, contentType, uploadedAt, url } ]
+
+```json
+[ { "filename": "…", "hash256": "…", "size": 0,
+    "contentType": "…", "uploadedAt": "…", "url": "…" } ]
 ```
 
-Download all assets to the launcher data dir, sha256-verify each, re-download on
-mismatch. Currently ships `FortniteClient-Win64-Shipping.exe` (patched client),
-`NeoPrism.Agent.exe`, `NeoPrism.Bootstrapper.exe`. The patched exe redirects Epic
-hostnames to NeoFN services (verified in-game: requests aimed at
-`account-public-service-prod.ol.epicgames.com` are served by neofn.dev).
+Download every asset into the launcher data dir, sha256-verify each, re-download on
+mismatch. Currently shipped:
 
-## 8. Launch recipe (exact — `GameLauncher.LaunchAsync`)
+| Asset | Role |
+| --- | --- |
+| `FortniteClient-Win64-Shipping.exe` | Patched client — required |
+| `NeoPrism.Agent.exe` | Best-effort |
+| `NeoPrism.Bootstrapper.exe` | Best-effort |
 
-Executable: prism-patched `FortniteClient-Win64-Shipping.exe`.
-Working dir: `<install>/<version>/FortniteGame/Binaries/Win64` (must contain the
-vanilla build's exe).
+The patched exe redirects Epic hostnames to NeoFN services: verified in-game,
+requests aimed at `account-public-service-prod.ol.epicgames.com` are served by
+neofn.dev.
+
+## 8. Launch recipe
+
+Exact reproduction of `GameLauncher.LaunchAsync`.
+
+| | |
+| --- | --- |
+| **Executable** | prism-patched `FortniteClient-Win64-Shipping.exe` |
+| **Working dir** | `<install>/<version>/FortniteGame/Binaries/Win64` (must contain the vanilla build's exe) |
 
 ```
--basedir="<that Win64 dir>"
+-basedir=<that Win64 dir>
 -epicapp=Fortnite -epicenv=Prod -epicportal -skippatchcheck -nobe -fromfl=eac
 -AUTH_LOGIN=unused -AUTH_TYPE=exchangecode -AUTH_PASSWORD=<exchange code 1>
 -p=<exchange code 2>
 -fltoken=<random 24 chars [a-z0-9]>
 ```
 
-`-p` is prism's code (the decompile names it *prismCode*). Preconditions checked
-first: lightswitch UP, not banned (both services), assets present, 2 fresh exchange
-codes.
+`-p` is prism's code — the decompile names it *prismCode*. Preconditions checked
+first, in order: lightswitch `UP`, not banned (both services), prism assets present,
+two fresh exchange codes minted.
 
-### Linux notes (umu-run / Proton)
+### 8.1 Linux notes (umu-run / Proton)
 
-- On Windows the args form one raw command line. Through umu→Wine, argv is rebuilt
-  and **embedded quotes get escaped** — pass `-basedir` bare (no quotes) or UE4's
-  parser leaves a stray backslash → *"Failed to open descriptor file"*.
+- On Windows the arguments form one raw command line. Through umu→Wine, argv is
+  rebuilt and **embedded quotes get escaped** — pass `-basedir` bare (no quotes), or
+  UE4's parser leaves a stray backslash and fails with *"Failed to open descriptor
+  file"*.
 - Unix install paths map into Wine as `Z:\<path>`; don't double the backslash after
-  the drive letter. If the install is inside the prefix's `drive_c`, use `C:\…`.
-- The game is DX11; umu-run + any modern Proton works. Logs land at
+  the drive letter. If the install sits inside the prefix's `drive_c`, use `C:\…`
+  instead.
+- The game is DX11; umu-run plus any modern Proton works. Logs land at
   `<prefix>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/FortniteGame.log`.
 
-## 9. Login flow inside the game (observed)
+## 9. In-game login flow (observed)
 
-Exchange code → `StartLogin` → "Signing in to Epic services" (URL nominally Epic's,
-served by neofn.dev) → kill-sessions 204 → `Successfully logged in user` →
-`CheckPlatformPlayAllowed` → `CheckServiceAvailability` → `CheckEntitledToPlay`
-(`QueryAvailableFeature`); a `missing_action 'PLAY'` rejection triggers
-`OnGrantFreeAccess` (auto-grant flow) then re-check — on failure, ForceLogout to the
-email/password fallback screen. I.e. a login screen usually means *entitlement*, not
-*authentication*, trouble.
+```
+exchange code
+  → StartLogin
+  → "Signing in to Epic services"   (URL nominally Epic's, served by neofn.dev)
+  → kill-sessions 204
+  → "Successfully logged in user"
+  → CheckPlatformPlayAllowed
+  → CheckServiceAvailability
+  → CheckEntitledToPlay  (QueryAvailableFeature)
+       └─ missing_action 'PLAY' → OnGrantFreeAccess (auto-grant) → re-check
+       └─ still failing → ForceLogout to the email/password fallback screen
+```
+
+So a login screen at this point usually means an **entitlement** problem, not an
+**authentication** one.
+
+## 10. Known ambiguities
+
+The format leaves a few places where a value's encoding can only be guessed from its
+shape:
+
+| Case | Risk |
+| --- | --- |
+| A 3-digit decimal string | Indistinguishable from a 1-byte blob. `neo` treats 3 digits as a plain int, so `DataGroupList` group numbers decode correctly. |
+| A plain int with 6, 9 or 12 digits | Its length is a multiple of 3, so it is misread as a blob. Verified: a plain `"100000000"` (100 MB) decodes to `100`. Not observed in current manifests, but unguarded. |
+| `ChunkFilesizeList` / `FileChunkParts` | Appear as plain ints in the manifests seen so far; `neo.parse_num` accepts either form so both parse. |
+
+These are recorded rather than resolved: current builds (FL 13) parse correctly end
+to end, per the validated 10.40 install recorded in the README's status table.
