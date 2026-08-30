@@ -336,7 +336,7 @@ class TestLogCommand(CliTestCase):
             "Local" / "FortniteGame" / "Saved" / "Logs"
         log_dir.mkdir(parents=True)
         log = log_dir / "FortniteGame.log"
-        log.write_text(" mundane line\nCheckEntitledToPlay → 403\n")
+        log.write_text(" mundane line\nLogXyz: Display: stats spam\nCheckEntitledToPlay → 403\n")
 
         with support.environment(WINEPREFIX=str(prefix)):
             self.assertEqual(neo.find_game_log(), str(log))
@@ -346,6 +346,7 @@ class TestLogCommand(CliTestCase):
         self.assertIn("403", text)
         self.assertIn("\033[33m", text)   # the entitlement line is highlighted
         self.assertNotIn("\033[33m" + " mundane", text)
+        self.assertNotIn("\033[33m" + "LogXyz", text)  # \bPLAY\b: "Display" stays plain
 
 
 

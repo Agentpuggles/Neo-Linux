@@ -56,6 +56,22 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.5] — 2026-08-30
+
+### Fixed
+
+- `neo log`'s highlighter no longer lights up every `Display:` line — the
+  pattern matched `PLAY` case-insensitively inside "Display"; it is now
+  `\bPLAY\b` (the same trap this session's grep hit twice). A regression test
+  pins a `Display:` line as unhighlighted.
+
+### Added
+
+- `docs/protocol.md` §9.1 "Launch-day tripwire": the exact log lines that
+  change when the `PLAY` entitlement is granted, captured from a live
+  pre-launch boot (login OK → platform OK → 403 ×2 → `AbortLoggingIn` →
+  `SignIn_Credentials`), including the 3-second entitlement re-check.
+
 ## [0.5.4] — 2026-08-30
 
 Launch-day proof pass on the command line itself.
