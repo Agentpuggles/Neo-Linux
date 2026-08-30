@@ -74,6 +74,8 @@ Live validation round two — the session now completes against production.
   — accepted; there is no separate friends token (matches the IL reading).
 - The server accepts the official `neo_launcher_bind_` resource pattern.
 - REST fallback payload at an empty roster is a bare `[]`.
+- (Follow-up run, same day: full session through the roster iq and the
+  own-presence echo — the empty roster is simply a pre-launch service.)
 
 ## [0.5.2] — 2026-08-30
 
