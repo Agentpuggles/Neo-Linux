@@ -44,6 +44,12 @@ class TestFrameCodec(unittest.TestCase):
         self.assertIsNone(neo.ws_parse_frame(frame[:-1]))
 
 
+class TestCliSurface(unittest.TestCase):
+    def test_verbose_has_the_documented_short_form(self):
+        args = neo.make_parser().parse_args(["friends", "-v"])
+        self.assertTrue(args.verbose)
+
+
 class TestSaslAndStanzas(unittest.TestCase):
     def test_plain_payload_is_null_separated_base64(self):
         self.assertEqual(neo.sasl_plain("acct", "tok"),

@@ -348,3 +348,44 @@ class TestLogCommand(CliTestCase):
         self.assertNotIn("\033[33m" + " mundane", text)
 
 
+
+
+class TestSourceHygiene(CliTestCase):
+    """Invalid escape sequences warn on newer Pythons and become errors eventually.
+
+    Found in the wild: running `neo` on Python 3.12 surfaced a SyntaxWarning
+    from a docstring containing a Windows path. This tokenizes `neo` and fails
+    on any invalid escape in any non-raw string, on every Python in the CI
+    matrix (the interpreter's own warning only appears on 3.12+).
+    """
+
+    def test_no_invalid_escape_sequences(self):
+        import io as _io
+        import tokenize
+
+        backslash = chr(92)
+        # everything a backslash may legally precede inside a non-raw string
+        valid = set("'\"" + backslash + "abfnrtv01234567xNuU" + chr(10))
+        source = (support.REPO_ROOT / "neo").read_text(encoding="utf-8")
+        offenders = []
+        for tok in tokenize.generate_tokens(_io.StringIO(source).readline):
+            if tok.type != tokenize.STRING:
+                continue
+            text = tok.string
+            i, raw = 0, False
+            while i < len(text) and text[i] in "bBfFuUrR":
+                if text[i] in "rR":
+                    raw = True
+                i += 1
+            if raw:
+                continue
+            body = text[i:]
+            j = body.find(backslash)
+            while j != -1:
+                follower = body[j + 1] if j + 1 < len(body) else ""
+                if follower not in valid:
+                    offenders.append(f"line {tok.start[0]}: {text[:60]}")
+                    break
+                j = body.find(backslash, j + 2)
+        self.assertEqual(offenders, [])
+
