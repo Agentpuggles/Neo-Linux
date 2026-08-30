@@ -498,9 +498,9 @@ speaking raw XML stanzas over a websocket.
 | Piece | Observed in the binary |
 | --- | --- |
 | Transport | websocket to `wss://xmpp-service-prod.neofn.dev` (`NeoPresenceService.EnsureConnectedAsync`) |
-| Session flow | `ConnectAsync` → `OpenStreamAsync` → `AuthenticateAsync` ("XMPP SASL authentication") → `BindAsync` → `EstablishSessionAsync` → `RequestRosterAsync` |
+| Session flow | `ConnectAsync` → `OpenStreamAsync` (RFC 7395 `<open>`/`<close>` framing) → `AuthenticateAsync` (SASL PLAIN) → `BindAsync` (`urn:ietf:params:xml:ns:xmpp-bind`) → `EstablishSessionAsync` (`xmpp-session`) → `RequestRosterAsync` (`jabber:iq:roster`) |
 | Bind resource | `neo_launcher_bind_{n}` (interlocked counter), presence resource `"launcher"` |
-| Auth material | `GetFriendsAccessTokenAsync` — a dedicated token, distinct from the account access token; presumably the SASL credential |
+| Auth | SASL **PLAIN** (`\x00authcid\x00password`, base64) — mechanism and separators are literals beside the stanza writer; the password slot is fed by `GetFriendsAccessTokenAsync`, a dedicated friends token distinct from the account access token |
 | Events | `RawStanzaReceived` / `PresenceReceived` / `MessageReceived` / `Disconnected`; `LastInboundXml`/`LastOutboundXml` kept for debugging |
 | Presence model | `NeoPresenceView`: accountId, status, activity, gameStatus, resource, resourceType, priority; lifecycle published as the game starts/stops |
 | HTTP side | friends service `https://friends-public-service-prod.neofn.dev/friends` for roster/search/actions (add/remove, nicknames), so not everything needs XMPP |
@@ -511,9 +511,11 @@ speaking raw XML stanzas over a websocket.
    `socket`+ `ssl` + `base64` for the key, then a frame codec — client frames are
    never masked server-side, so the codec is small). ~150 lines, testable against
    a local socket pair.
-2. The SASL mechanism string and stream XML — **composed at runtime, not visible as
-   literals**; one live capture (or a deeper IL read of `AuthenticateAsync`) settles
-   it. Until then any implementation is a guess; this is the main open unknown.
+2. The XMPP details are no longer a mystery: SASL **PLAIN** with the two NUL
+   separators, RFC 7395 websocket framing, standard bind/session/roster IQs (all
+   literals in the stanza writer). The one live-capture item left is which exact
+   string PLAIN's password slot carries (friends-token vs account-token) and the
+   authcid format — `GetFriendsAccessTokenAsync` strongly implies the former.
 3. Roster + presence state tracking, which the HTTP endpoints may make unnecessary
    for a read-only `neo friends` listing (roster over HTTP, presence over XMPP).
 4. A decision on backgrounding: presence publishing implies staying connected for
