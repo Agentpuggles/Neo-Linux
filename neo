@@ -34,8 +34,8 @@ import glob
 import hashlib
 import json
 import os
-import random
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -51,7 +51,7 @@ import urllib.request
 import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -796,6 +796,23 @@ def to_winpath(path, prefix=None):
             return "C:" + rp[len(dc):].replace(os.sep, "\\")
     return "Z:" + path.replace("/", "\\")
 
+# The official argument vector, character-for-character, as read out of
+# GameLauncher.LaunchAsync in NeoLauncher 1.0.7 (order included). Only known
+# deviation: -basedir is passed bare here -- the Windows client quotes it
+# because it builds one raw command line; through umu/wine the embedded quotes
+# get re-escaped and mangle the path (docs/protocol.md 8.1).
+OFFICIAL_ARGS = ("-epicapp=Fortnite", "-epicenv=Prod", "-epicportal",
+                 "-skippatchcheck", "-nobe", "-fromfl=eac",
+                 "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode")
+
+def game_argv(basedir_win, code1, code2, fltoken, extra=()):
+    return ["-basedir=" + basedir_win, *OFFICIAL_ARGS,
+            "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken,
+            *extra]
+
+def fl_token():
+    return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(24))
+
 def cmd_launch(args, auth):
     st = load_state()
     _version, inst = select_install(args.version, st)
@@ -847,22 +864,13 @@ def cmd_launch(args, auth):
     code1, exp1 = auth.exchange_code()
     code2, _exp2 = auth.exchange_code()
     if exp1: print(f"  exchange codes valid for ~{exp1}s (game must redeem before then)")
-    fltoken = "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
+    fltoken = fl_token()
 
     basedir_win = to_winpath(win64)
     extra = list(args.extra or [])
     if extra and extra[0] == "--":
         extra = extra[1:]  # allow the `neo launch 10.40 -- -windowed` spelling too
-    argv = [
-        # bare (unquoted) basedir: through umu/wine the quotes get escaped to \"
-        # and UE4's parser leaves a stray backslash, mangling the path
-        "-basedir=" + basedir_win,
-        "-epicapp=Fortnite", "-epicenv=Prod", "-epicportal",
-        "-skippatchcheck", "-nobe", "-fromfl=eac",
-        "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode",
-        "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken,
-        *extra,
-    ]
+    argv = game_argv(basedir_win, code1, code2, fltoken, extra)
 
     umu = os.environ.get("NEO_UMU", "umu-run")
     cmd = [umu] + (["--proton", args.proton] if getattr(args, "proton", None) else []) \
