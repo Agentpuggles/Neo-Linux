@@ -80,6 +80,9 @@ Launch-day proof pass on the command line itself.
   official client. The only deviation stays deliberate: `-basedir` unquoted,
   because embedded quotes are re-escaped through the umu/wine boundary
   (docs/protocol.md §8.1, engineering note 11).
+- Live hardware pass (umu 1.4.3 / Proton-CachyOS): `/proc` cmdline of the
+  running game shows the full vector delivered intact; client boots, auto-logins
+  and exits cleanly at the entitlement wall while access is false.
 
 ## [0.5.3] — 2026-08-30
 
