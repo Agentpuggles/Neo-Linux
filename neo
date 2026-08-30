@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -46,6 +46,7 @@ ACCOUNT  = "https://account-public-service-prod.neofn.dev/account"
 LAUNCHER = "https://launcher-public-service-prod06.neofn.dev/launcher"
 LIGHTSW  = "https://lightswitch-public-service-prod.neofn.dev/lightswitch"
 PRISM    = "https://prism-public-service-prod.neofn.dev/prism"
+STORE    = "https://store.neofn.dev/api/v1"
 CLIENT_ID = "8a4eeb89e05743fc9dba6fccb6766d35"
 CLIENT_SECRET = "7fe1392842624667b996d55ab5ebef03"
 REDIRECT_URI = "neolauncher://callback/auth"
@@ -232,6 +233,30 @@ def prism_assets(auth):
 def prism_ban(auth):
     return jhttp("GET", PRISM + "/api/v1/ban-status",
                  headers={"Authorization": "Bearer " + auth.access()})
+
+def store_entitlements(auth):
+    # purchases (e.g. early access) register here — see docs/protocol.md §11.3
+    return jhttp("GET", STORE + "/entitlements/" + auth.d["account_id"],
+                 headers={"Authorization": "Bearer " + auth.access()})
+
+def describe_entitlements(ent):
+    """One-line summary of the store entitlements payload (§11.3).
+
+    Field names come from the official client's DTOs, which parse
+    case-insensitively; tolerate both spellings and anything unexpected.
+    """
+    if not isinstance(ent, dict):
+        return str(ent)[:120]
+    offers = ent.get("ownedOfferIds") or ent.get("owned_offer_ids") or []
+    orders = ent.get("orders") or []
+    subs = ent.get("subscriptions") or []
+    paid = [o for o in orders if isinstance(o, dict)
+            and o.get("paid") and not o.get("refunded")]
+    bits = []
+    if offers: bits.append("offers " + ", ".join(str(o) for o in offers))
+    if orders: bits.append(f"{len(paid)}/{len(orders)} orders paid")
+    if subs:   bits.append(f"{len(subs)} subscription(s)")
+    return "; ".join(bits) if bits else "none on file"
 
 # ---------------------------------------------------------------- manifest
 def blob_to_bytes(s):
@@ -711,6 +736,9 @@ def cmd_status(args, auth):
                        + "/fortniteAccess", headers={"Authorization": "Bearer " + auth.access()})
             print(f"Fortnite access  : {fa}")
         except Exception as e: warn(f"fortniteAccess: {e}")
+        try:
+            print("Entitlements     :", describe_entitlements(store_entitlements(auth)))
+        except Exception as e: warn(f"store entitlements: {e}")
     try:
         oc = jhttp("GET", LAUNCHER + "/api/public/onlinecount")
         print(f"Players online   : {oc}")

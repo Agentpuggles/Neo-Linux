@@ -23,6 +23,7 @@ side by side.
 | 8 | [Launch recipe](#8-launch-recipe) | Exact command line, Wine/umu-run notes |
 | 9 | [In-game login flow](#9-in-game-login-flow-observed) | What happens after the exchange code |
 | 10 | [Known ambiguities](#10-known-ambiguities) | Where the format leaves room for misreads |
+| 11 | [Launcher self-update and access gating](#11-launcher-self-update-and-access-gating) | Velopack feed & schedule, playability gates, store entitlements |
 
 ## Gotchas at a glance
 
@@ -38,6 +39,8 @@ side by side.
 | 8 | The R2 edge **transiently 404s objects that exist** — retry with backoff | [6.3](#63-cdn-gotchas-cloudflare-r2) |
 | 9 | Through umu→Wine, **embedded quotes get escaped** — pass `-basedir` bare | [8.1](#81-linux-notes-umu-run--proton) |
 | 10 | An in-game login screen usually means **entitlement**, not authentication | [9](#9-in-game-login-flow-observed) |
+| 11 | The web UI checks `fortniteAccess` **once per start**; the refresh event is never re-dispatched — a grayed Launch button needs a launcher restart | [11.2](#112-playability-gates) |
+| 12 | The public-build allowlist (`["10.40"]`) is baked into **both** the DLL and the web bundle — a new public build ships as a launcher update | [11.2](#112-playability-gates) |
 
 ---
 
@@ -51,6 +54,8 @@ side by side.
 | Prism | `https://prism-public-service-prod.neofn.dev/prism` |
 | Fortnite (MCP) | `https://fortnite-public-service-prod11.neofn.dev/fortnite` |
 | Content / news | `https://fortnitecontent-website-prod07.neofn.dev/content/api` |
+| Store / entitlements | `https://store.neofn.dev/api/v1` |
+| Analytics | `https://analytics-public-service-prod.neofn.dev/analytics` |
 | XMPP (friends) | `wss://xmpp-service-prod.neofn.dev` |
 | Content CDN | from distribution points, e.g. `https://content-cdn.neofn.dev` |
 
@@ -392,3 +397,87 @@ shape:
 
 These are recorded rather than resolved: current builds (FL 13) parse correctly end
 to end, per the validated 10.40 install recorded in the README's status table.
+
+## 11. Launcher self-update and access gating
+
+Read out of NeoLauncher 1.0.7 itself — the `NeoLauncher.dll` managed code plus
+the bundled `web/` WebView2 app it hosts — and cross-checked against the
+on-disk Velopack layout (`Update.exe`, `current/`, `packages/`). Answers the
+two questions the wire format alone cannot: *how does the launcher update, and
+what decides who is allowed to play?*
+
+### 11.1 Self-update (Velopack)
+
+```http
+GET /launcher/api/public/releases             (Bearer client credentials)
+```
+
+`NeoUpdateSource` maps this feed into a `Velopack.VelopackAssetFeed` and hands
+it to `Velopack.UpdateManager`; `sq.version` beside `Update.exe` is Velopack's
+local manifest (id `NeoLauncher`, channel `win`, current version). Packages are
+full `.nupkg`s — `packages/NeoLauncher-1.0.7-full.nupkg` — no deltas observed.
+
+| When | What happens |
+| --- | --- |
+| startup | update check runs immediately |
+| every 30 min | `System.Threading.Timer` re-check (`LauncherUpdateInterval`) |
+| window activated | re-check, throttled to ≥5 min apart |
+| update found | downloaded automatically **unless** the game is running or a build is installing, then applied and the launcher **restarts itself** (`ApplyUpdatesAndRestart`) |
+
+State machine `idle → checking → upToDate | available → downloading → ready`,
+pushed to the web UI as the `neo-launcher-update-changed` event; Settings has a
+manual check (`checkLauncherUpdate` / `applyLauncherUpdate`). Because the web
+UI ships inside the package, UI changes ride the same channel.
+
+### 11.2 Playability gates
+
+Three gates — and, for the record, **no launch date or countdown logic exists
+anywhere** in the host or the web bundle (no date constants, no `DateTime`
+comparisons, no countdown code):
+
+1. **Per-account client gate.**
+   `GET /account/api/public/account/{id}/fortniteAccess` answers the literal
+   body `true` or `false`. On `false` the launcher refuses to launch with
+   *"No Access — Your account doesn't have access to Neo. Neo is in private
+   testing. Check the discord for more information."* The web UI fetches it
+   once at mount (`get_fortnite_access`) and caches it; the host never
+   re-dispatches the refresh event, so a grayed Launch button stays gray until
+   the launcher restarts (see gotcha 11). `neo launch` never consults this
+   gate — `neo status` prints it.
+2. **Baked-in build allowlist.** `PublicBuildVersions = ["10.40"]`, with a
+   3-account `DeveloperAccountIds` override, is hardcoded in *both* the DLL and
+   the web bundle (`const eM=["10.40"]`). Installing anything else is refused:
+   *"This build is currently unavailable on this account."* Consequence: a new
+   public build must ship as a launcher update first — the 30-minute timer
+   above rolls it out.
+3. **The in-game `PLAY` entitlement** ([§9](#9-in-game-login-flow-observed)) —
+   the server-side switch that actually opens the game. Nothing launcher-side
+   is required when it flips; the same command line just starts working.
+
+### 11.3 Store entitlements
+
+```http
+GET https://store.neofn.dev/api/v1/entitlements/{accountId}    (Bearer user token)
+```
+
+```json
+{ "ownedOfferIds": ["5"],
+  "orders": [ { "offerId": "5", "subscriptionId": null, "paid": true, "refunded": false } ],
+  "subscriptions": [] }
+```
+
+Field set per the client's DTOs (`AccountEntitlementsDto`, parsed
+case-insensitively); purchases — early access, supporter tiers — land here as
+paid orders, and the launcher derives an account tier from them
+(`getAccountTier`). `neo status` (v0.3.0) prints a one-line summary so a
+purchase can be watched registering on the account without the Windows client.
+
+### 11.4 WebView2 bridge (selected commands)
+
+The WinUI 3 window hosts the bundled `web/` app; `NeoWebBridge` exposes ~60
+commands over it. Notable: `launch_neo_build`, `import_neo_build`,
+`migrate_neo_library`, `get_builds`, `get_neo_server_status` (polled every
+15 s), `getServicesState` (every 30 s and on focus), `get_fortnite_access`,
+`getAccountTier`, `checkLauncherUpdate`, `applyLauncherUpdate`. The host pushes
+`neo-*` DOM events back (`neo-launcher-update-changed`,
+`neo-game-state-changed`, `neo-service-builds-updated`, …).

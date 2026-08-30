@@ -50,7 +50,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 
 ## Status
 
-Current release: **v0.2.0**.
+Current release: **v0.3.0**.
 
 | Feature | State |
 | --- | --- |
@@ -61,7 +61,8 @@ Current release: **v0.2.0**.
 | Install / verify / reinstall with a relocatable cache | ✅ |
 | Prism asset management (sha256-verified, auto-updated) | ✅ |
 | Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
-| Playing | ⏳ waits on NeoFN granting the `PLAY` entitlement (pre-launch as of v0.2.0) |
+| Playing | ⏳ waits on NeoFN granting account access + the `PLAY` entitlement (private testing as of v0.3.0) |
+| Store / early-access entitlement visibility (`neo status`) | ✅ |
 
 ## Requirements
 
