@@ -23,6 +23,8 @@ side by side.
 | 8 | [Launch recipe](#8-launch-recipe) | Exact command line, Wine/umu-run notes |
 | 9 | [In-game login flow](#9-in-game-login-flow-observed) | What happens after the exchange code |
 | 10 | [Known ambiguities](#10-known-ambiguities) | Where the format leaves room for misreads |
+| 11 | [Launcher self-update and access gating](#11-launcher-self-update-and-access-gating) | Velopack feed & schedule, playability gates, store entitlements |
+| 12 | [Friends over XMPP: scoping notes](#12-friends-over-xmpp-scoping-notes) | What a `neo friends` would take, read from the client |
 
 ## Gotchas at a glance
 
@@ -38,6 +40,8 @@ side by side.
 | 8 | The R2 edge **transiently 404s objects that exist** — retry with backoff | [6.3](#63-cdn-gotchas-cloudflare-r2) |
 | 9 | Through umu→Wine, **embedded quotes get escaped** — pass `-basedir` bare | [8.1](#81-linux-notes-umu-run--proton) |
 | 10 | An in-game login screen usually means **entitlement**, not authentication | [9](#9-in-game-login-flow-observed) |
+| 11 | The web UI checks `fortniteAccess` **once per start**; the refresh event is never re-dispatched — a grayed Launch button needs a launcher restart | [11.2](#112-playability-gates) |
+| 12 | The public-build allowlist (`["10.40"]`) is baked into **both** the DLL and the web bundle — a new public build ships as a launcher update | [11.2](#112-playability-gates) |
 
 ---
 
@@ -51,6 +55,8 @@ side by side.
 | Prism | `https://prism-public-service-prod.neofn.dev/prism` |
 | Fortnite (MCP) | `https://fortnite-public-service-prod11.neofn.dev/fortnite` |
 | Content / news | `https://fortnitecontent-website-prod07.neofn.dev/content/api` |
+| Store / entitlements | `https://store.neofn.dev/api/v1` |
+| Analytics | `https://analytics-public-service-prod.neofn.dev/analytics` |
 | XMPP (friends) | `wss://xmpp-service-prod.neofn.dev` |
 | Content CDN | from distribution points, e.g. `https://content-cdn.neofn.dev` |
 
@@ -330,6 +336,18 @@ neofn.dev.
 
 ## 8. Launch recipe
 
+> **Vector verified against the binary (0.5.4):** all twelve base arguments
+> match `GameLauncher.LaunchAsync` character-for-character, order included —
+> re-read from the DLL and pinned by `tests/test_cli.py::TestLaunchArgVector`.
+> The `-basedir` quoting remains the one deliberate deviation (§8.1).
+>
+> **Observed end-to-end on live hardware (2026-08-30, umu 1.4.3 /
+> Proton-CachyOS / ntsync):** the `/proc/…/cmdline` of the running launch
+> chain shows the vector intact — basedir unquoted and un-mangled, all
+> twelve flags in order, both exchange codes distinct — and the client
+> boots and auto-logins. The game exits cleanly at the entitlement wall
+> while `fortniteAccess` is false, as designed.
+
 Exact reproduction of `GameLauncher.LaunchAsync`.
 
 | | |
@@ -379,6 +397,24 @@ exchange code
 So a login screen at this point usually means an **entitlement** problem, not an
 **authentication** one.
 
+### 9.1 Launch-day tripwire (baseline captured 2026-08-30)
+
+With `fortniteAccess: false`, the client's own log pins the exact sequence that
+changes the day access is granted (`neo log` highlights these lines):
+
+```
+Successfully logged in user … DisplayName=[…]          ← stays
+play IS allowed on this platform                       ← stays
+QueryAvailableFeature → 403 missing_action 'PLAY'      ← DISAPPEARS
+AbortLoggingIn [CheckEntitledToPlay] [LoginResult=20]  ← DISAPPEARS
+SignIn_Credentials panel pushed                        ← DISAPPEARS
+```
+
+The client re-checks the entitlement ~3 s after the first 403 before aborting,
+so a grant that lands mid-boot is still caught without a relaunch. Diff a new
+log against the pre-launch baseline (`neo log > baseline`) and those three
+absences are the whole signal.
+
 ## 10. Known ambiguities
 
 The format leaves a few places where a value's encoding can only be guessed from its
@@ -392,3 +428,144 @@ shape:
 
 These are recorded rather than resolved: current builds (FL 13) parse correctly end
 to end, per the validated 10.40 install recorded in the README's status table.
+
+## 11. Launcher self-update and access gating
+
+Read out of NeoLauncher 1.0.7 itself — the `NeoLauncher.dll` managed code plus
+the bundled `web/` WebView2 app it hosts — and cross-checked against the
+on-disk Velopack layout (`Update.exe`, `current/`, `packages/`). Answers the
+two questions the wire format alone cannot: *how does the launcher update, and
+what decides who is allowed to play?*
+
+### 11.1 Self-update (Velopack)
+
+```http
+GET /launcher/api/public/releases             (Bearer client credentials)
+```
+
+`NeoUpdateSource` maps this feed into a `Velopack.VelopackAssetFeed` and hands
+it to `Velopack.UpdateManager`; `sq.version` beside `Update.exe` is Velopack's
+local manifest (id `NeoLauncher`, channel `win`, current version). Packages are
+full `.nupkg`s — `packages/NeoLauncher-1.0.7-full.nupkg` — no deltas observed.
+
+| When | What happens |
+| --- | --- |
+| startup | update check runs immediately |
+| every 30 min | `System.Threading.Timer` re-check (`LauncherUpdateInterval`) |
+| window activated | re-check, throttled to ≥5 min apart |
+| update found | downloaded automatically **unless** the game is running or a build is installing, then applied and the launcher **restarts itself** (`ApplyUpdatesAndRestart`) |
+
+State machine `idle → checking → upToDate | available → downloading → ready`,
+pushed to the web UI as the `neo-launcher-update-changed` event; Settings has a
+manual check (`checkLauncherUpdate` / `applyLauncherUpdate`). Because the web
+UI ships inside the package, UI changes ride the same channel.
+
+### 11.2 Playability gates
+
+Three gates — and, for the record, **no launch date or countdown logic exists
+anywhere** in the host or the web bundle (no date constants, no `DateTime`
+comparisons, no countdown code):
+
+1. **Per-account client gate.**
+   `GET /account/api/public/account/{id}/fortniteAccess` answers the literal
+   body `true` or `false`. On `false` the launcher refuses to launch with
+   *"No Access — Your account doesn't have access to Neo. Neo is in private
+   testing. Check the discord for more information."* The web UI fetches it
+   once at mount (`get_fortnite_access`) and caches it; the host never
+   re-dispatches the refresh event, so a grayed Launch button stays gray until
+   the launcher restarts (see gotcha 11). `neo launch` never consults this
+   gate — `neo status` prints it.
+2. **Baked-in build allowlist.** `PublicBuildVersions = ["10.40"]`, with a
+   3-account `DeveloperAccountIds` override, is hardcoded in *both* the DLL and
+   the web bundle (`const eM=["10.40"]`). Installing anything else is refused:
+   *"This build is currently unavailable on this account."* Consequence: a new
+   public build must ship as a launcher update first — the 30-minute timer
+   above rolls it out.
+3. **The in-game `PLAY` entitlement** ([§9](#9-in-game-login-flow-observed)) —
+   the server-side switch that actually opens the game. Nothing launcher-side
+   is required when it flips; the same command line just starts working.
+
+### 11.3 Store entitlements
+
+```http
+GET https://store.neofn.dev/api/v1/entitlements/{accountId}    (Bearer user token)
+```
+
+```json
+{ "ownedOfferIds": ["5"],
+  "orders": [ { "offerId": "5", "subscriptionId": null, "paid": true, "refunded": false } ],
+  "subscriptions": [] }
+```
+
+Field set per the client's DTOs (`AccountEntitlementsDto`, parsed
+case-insensitively); purchases — early access, supporter tiers — land here as
+paid orders, and the launcher derives an account tier from them
+(`getAccountTier`). `neo status` (v0.3.0) prints a one-line summary so a
+purchase can be watched registering on the account without the Windows client.
+
+### 11.4 WebView2 bridge (selected commands)
+
+The WinUI 3 window hosts the bundled `web/` app; `NeoWebBridge` exposes ~60
+commands over it. Notable: `launch_neo_build`, `import_neo_build`,
+`migrate_neo_library`, `get_builds`, `get_neo_server_status` (polled every
+15 s), `getServicesState` (every 30 s and on focus), `get_fortnite_access`,
+`getAccountTier`, `checkLauncherUpdate`, `applyLauncherUpdate`. The host pushes
+`neo-*` DOM events back (`neo-launcher-update-changed`,
+`neo-game-state-changed`, `neo-service-builds-updated`, …).
+
+## 12. Friends over XMPP: scoping notes
+
+Scoped from the decompiled client, implemented in `neo` as **`neo friends`**,
+and **live-validated against production (2026-08-30)**: subprotocol `xmpp`
+required, SASL PLAIN accepted with authcid = account id + the account access
+token, the official bind resource accepted, roster iq round-trip and the
+presence echo observed. Server quirk worth knowing: replies to empty-bodied
+iqs are self-closing — correlate by iq id, never by `</iq>`.
+
+The official client does not use a library for this: `NeoLauncher.dll` contains a
+hand-rolled XMPP client (`NeoLauncher.Services.Friends.NeoXmppClient`, 35 methods)
+speaking raw XML stanzas over a websocket.
+
+### 12.1 What the client does
+
+| Piece | Observed in the binary |
+| --- | --- |
+| Transport | websocket to `wss://xmpp-service-prod.neofn.dev` (`NeoPresenceService.EnsureConnectedAsync`), **requesting subprotocol `xmpp`** (`AddSubProtocol("xmpp")`) — the edge answers `400 Bad Request` without it (found live; fixed in `neo` 0.5.2) |
+| Session flow | `ConnectAsync` → `OpenStreamAsync` (RFC 7395 `<open>`/`<close>` framing) → `AuthenticateAsync` (SASL PLAIN) → `BindAsync` (`urn:ietf:params:xml:ns:xmpp-bind`) → `EstablishSessionAsync` (`xmpp-session`) → `RequestRosterAsync` (`jabber:iq:roster`) |
+| Bind resource | `neo_launcher_bind_{n}` (interlocked counter), presence resource `"launcher"` |
+| Auth | SASL **PLAIN** (`\x00authcid\x00password`, base64): authcid = **account id**, password = the **account access token** (`GetFriendsAccessTokenAsync` just calls `AccountService.GetAccessTokenAsync` — there is no separate friends token) |
+| Events | `RawStanzaReceived` / `PresenceReceived` / `MessageReceived` / `Disconnected`; `LastInboundXml`/`LastOutboundXml` kept for debugging |
+| Presence model | `NeoPresenceView`: accountId, status, activity, gameStatus, resource, resourceType, priority; lifecycle published as the game starts/stops |
+| HTTP side | friends service `https://friends-public-service-prod.neofn.dev/friends` for roster/search/actions (add/remove, nicknames), so not everything needs XMPP; the roster call is `GET /api/public/friends/{id}?includePending=true` |
+
+### 12.2 What `neo friends` would take
+
+1. A websocket client on the standard library only: RFC 6455 handshake (`http.client`+
+   `socket`+ `ssl` + `base64` for the key, then a frame codec — client frames are
+   never masked server-side, so the codec is small). ~150 lines, testable against
+   a local socket pair.
+2. ~~Unknown~~ resolved: SASL **PLAIN**, authcid = account id, password = the
+   account access token (confirmed against the IL: `username`/`token` fields are
+   fed from `accountId` and `accessToken` at the `ConnectAsync` call site). The
+   remaining live-confirm items: whether the server requires the official bind
+   resource pattern, and the friends-REST payload shapes.
+3. Roster + presence state tracking, which the HTTP endpoints may make unnecessary
+   for a read-only `neo friends` listing (roster over HTTP, presence over XMPP).
+4. A decision on backgrounding: presence publishing implies staying connected for
+   the session; a listing command can connect, snapshot, and disconnect.
+
+Risk notes: the server may reject non-official bind resources or token types; and
+presence storms from polling reconnects would be antisocial — a snapshot client
+avoids both.
+
+### 12.3 Implementation (`neo friends`, v0.5.0)
+
+A ~10% RFC 6455 client (masked frames, ping/pong, fragmentation, extended
+lengths) plus the session above: open → PLAIN → re-open → bind
+(`neo_launcher_bind_1`, the official pattern) → session → roster iq →
+`<presence/>` → gather for `--wait` seconds (default 3) → unavailable → close.
+Display names come from the batch public-profile endpoint; if the websocket is
+unreachable the command falls back to `GET /friends/api/public/friends/{id}`
+(no presence). `NEO_XMPP` overrides the endpoint (plain `ws://` works, e.g. for
+a capture proxy). `--verbose` prints every stanza both ways — that output is
+the fastest way to correct this section against the live service.

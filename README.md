@@ -50,7 +50,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 
 ## Status
 
-Current release: **v0.2.0**.
+Current release: **v0.5.5**.
 
 | Feature | State |
 | --- | --- |
@@ -59,9 +59,18 @@ Current release: **v0.2.0**.
 | Build catalog + Epic BuildPatchServices manifest parsing | ✅ |
 | Parallel chunk downloader (16+ workers, resumable, SHA-1 per chunk **and** per file) | ✅ 411 files / 62,032 chunks / 61.9 GiB on 10.40 |
 | Install / verify / reinstall with a relocatable cache | ✅ |
+| Targeted repair — only broken files re-fetched (`neo verify --repair`) | ✅ |
+| Import an existing build folder, no re-download (`neo import`) | ✅ |
+| Access watch with desktop notification (`neo status --watch`) | ✅ |
+| Launcher news in the terminal (`neo news`) | ✅ |
+| Install-time disk preflight (cache + target checked before bytes move) | ✅ |
+| Friends roster + presence over XMPP (`neo friends`) | ✅ |
 | Prism asset management (sha256-verified, auto-updated) | ✅ |
 | Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
-| Playing | ⏳ waits on NeoFN granting the `PLAY` entitlement (pre-launch as of v0.2.0) |
+| Playing | ⏳ waits on NeoFN granting account access + the `PLAY` entitlement (private testing as of v0.3.0) |
+
+✅ live-validated 2026-08-30 against production, end to end: subprotocol, SASL PLAIN, bind, session, roster iq, presence echo. Rendering with a non-empty roster awaits someone to befriend once the service leaves private testing.
+| Store / early-access entitlement visibility (`neo status`) | ✅ |
 
 ## Requirements
 
@@ -110,9 +119,9 @@ Interrupted installs resume — re-run the same command and cached chunks are re
 ```
 neo <command> [options]
 
-  account   login · whoami · setup · logout · status
-  game      list · install · verify · launch
-  settings  config                     (see Configuration)
+  account   login · whoami · setup · logout · status · news · friends
+  game      list · install · import · verify · uninstall · launch
+  system    cache · log · config               (see Configuration)
 ```
 
 Run `neo <command> --help` for a command's own options.
@@ -125,19 +134,30 @@ Run `neo <command> --help` for a command's own options.
 | `neo whoami` | Display name, account id and email for the current session. |
 | `neo setup [name]` | With no name: shows first-run setup status. With a name: checks availability, then sets the display name. |
 | `neo logout` | Drops the stored session (`auth.json` is emptied, not deleted). |
-| `neo status` | Lightswitch service status, ban status (both services), `fortniteAccess`, players online. |
+| `neo status` | Lightswitch service status, ban status (both services), `fortniteAccess`, store entitlements, players online. `--watch` keeps polling until access is granted, then fires a desktop notification — the Windows launcher checks once per start and never re-checks, so this beats it to the punch. `--interval N` sets the period (min 10 s). |
+| `neo news` | Launcher news from the content service (`--json` for the raw payload). |
+| `neo friends` | Roster with display names and live presence, speaking the official client's own XMPP-over-websocket protocol (protocol.md §12): SASL PLAIN with the account id + access token, official bind resource. `--wait N` presence window, `--verbose` prints the raw stanzas. Falls back to the friends REST API when the websocket is unreachable. `NEO_XMPP` overrides the endpoint. |
 
 ### Game
 
 | Command | What it does |
 | --- | --- |
 | `neo list` | Every build in the catalog with size, release date and the `[LIVE]` marker. |
-| `neo install [version]` | Downloads and assembles a build. `version` is a substring such as `10.40`, or `live` (the default). Options: `-d DIR`, `-j WORKERS`, `--keep-cache`. |
-| `neo verify [version]` | Re-hashes every installed file against the stored manifest; reports missing and corrupted files. |
-| `neo launch [version]` | Checks the gates (lightswitch, bans), refreshes prism assets, mints two exchange codes and runs the game through umu-run. Options: `--dry-run` (print the command line and stop), `--proton PROTON`. |
+| `neo install [version]` | Downloads and assembles a build. `version` is a substring such as `10.40`, or `live` (the default). Options: `-d DIR`, `-j WORKERS`, `--keep-cache`. Free space on both the cache and the target volume is checked first (engineering note 9); `--force` skips that check. |
+| `neo import <path> <version>` | Registers a build folder that already exists on disk (must contain `FortniteGame/` and `Engine/`) — no 62 GB re-download. Fetches the manifest so `verify` works, and marks the install as imported. |
+| `neo verify [version]` | Re-hashes every installed file against the stored manifest. `--repair` re-fetches only the chunks the broken files need and rebuilds just those files — a full reinstall is never needed for a few bad files. |
+| `neo uninstall [version]` | Removes an install: deletes the build folder (only if it still carries neo's `.neo-manifest.json`) and drops the state entry. Prompts unless `--yes`. |
+| `neo launch [version]` | Checks the gates (lightswitch, bans), refreshes prism assets, mints two exchange codes and runs the game through umu-run. Options: `--dry-run` (print the command line and stop), `--proton PROTON`. Extra UE4 arguments go last: `neo launch 10.40 -windowed` (options like `--dry-run` must come before them). |
 
-`version` defaults to the newest installed build (highest `CL-` number) for `verify`
-and `launch`.
+`version` defaults to the newest installed build (highest `CL-` number) for `verify`,
+`uninstall` and `launch`.
+
+### System
+
+| Command | What it does |
+| --- | --- |
+| `neo cache [stats\|clear]` | Size of the chunk/manifest caches, and cleanup. `clear` drops cached chunks (manifests stay unless `--all`). |
+| `neo log [-f] [-p PATH]` | Prints the game's `FortniteGame.log` from the Wine prefix (auto-located via `WINEPREFIX`), with login/entitlement/error lines highlighted. `-f` tails it live — the fastest way to watch the `PLAY` entitlement flip. |
 
 ## Configuration
 
@@ -179,8 +199,10 @@ and `launch`.
 ### Disk usage
 
 Peak during an install ≈ compressed build size (cache) + full build size (install
-directory). The cache is purged on success unless you pass `--keep-cache`, which keeps
-it for offline repair at the cost of roughly one build's worth of disk.
+directory), both checked before the download starts. The cache is purged on success
+unless you pass `--keep-cache`, which keeps it for offline repair at the cost of
+roughly one build's worth of disk. `neo cache stats` shows what is sitting there;
+`neo cache clear` reclaims it.
 
 ## How it works
 

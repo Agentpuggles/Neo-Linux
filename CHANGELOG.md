@@ -56,6 +56,187 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.5] — 2026-08-30
+
+### Fixed
+
+- `neo log`'s highlighter no longer lights up every `Display:` line — the
+  pattern matched `PLAY` case-insensitively inside "Display"; it is now
+  `\bPLAY\b` (the same trap this session's grep hit twice). A regression test
+  pins a `Display:` line as unhighlighted.
+
+### Added
+
+- `docs/protocol.md` §9.1 "Launch-day tripwire": the exact log lines that
+  change when the `PLAY` entitlement is granted, captured from a live
+  pre-launch boot (login OK → platform OK → 403 ×2 → `AbortLoggingIn` →
+  `SignIn_Credentials`), including the 3-second entitlement re-check.
+
+## [0.5.4] — 2026-08-30
+
+Launch-day proof pass on the command line itself.
+
+### Added
+
+- The game argument vector is now pinned to the decompiled client: every base
+  flag, its order, the literal `-AUTH_LOGIN=unused`, and the fltoken charset
+  (a-z0-9, 24 chars) were re-read from `GameLauncher.LaunchAsync` in
+  NeoLauncher.dll and matched — a golden test (`TestLaunchArgVector`) fails if
+  either side drifts.
+
+### Changed
+
+- `fltoken` now uses `secrets.choice` (cryptographic), matching the official
+  client's `RandomNumberGenerator.GetString`; the argv construction moved into
+  `game_argv()`/`OFFICIAL_ARGS` so it is unit-testable.
+
+### Verified
+
+- All twelve base arguments are character-for-character identical to the
+  official client. The only deviation stays deliberate: `-basedir` unquoted,
+  because embedded quotes are re-escaped through the umu/wine boundary
+  (docs/protocol.md §8.1, engineering note 11).
+- Live hardware pass (umu 1.4.3 / Proton-CachyOS): `/proc` cmdline of the
+  running game shows the full vector delivered intact; client boots, auto-logins
+  and exits cleanly at the entitlement wall while access is false.
+
+## [0.5.3] — 2026-08-30
+
+Live validation round two — the session now completes against production.
+
+### Fixed
+
+- iq replies are correlated by **id** (`id="sess_1"`), not by a literal closing
+  tag: the live server answers empty-bodied iqs self-closing
+  (`<iq type='result' id='sess_1'/>`), so waiting for `</iq>` timed out after
+  the server had already said yes. iq `type="error"` replies now raise with the
+  stanza attached. The scripted-server test replies mirror the production form.
+
+### Validated live (from the `-v` trace of a logged-in machine)
+
+- SASL PLAIN with authcid = account id and password = the account access token
+  — accepted; there is no separate friends token (matches the IL reading).
+- The server accepts the official `neo_launcher_bind_` resource pattern.
+- REST fallback payload at an empty roster is a bare `[]`.
+- (Follow-up run, same day: full session through the roster iq and the
+  own-presence echo — the empty roster is simply a pre-launch service.)
+
+## [0.5.2] — 2026-08-30
+
+First live run feedback (`neo friends -v` on a logged-in machine — thanks,
+flynn): the XMPP handshake was refused with `400 Bad Request`, and the REST
+fallback parsed to zero friends. Both causes found in the DLL and fixed.
+
+### Fixed
+
+- The websocket upgrade now sends `Sec-WebSocket-Protocol: xmpp` — the official
+  client calls `AddSubProtocol("xmpp")` before connecting and the edge rejects
+  the handshake without it. This was the `400`.
+- Handshake failures now include whatever body the server sent (a plain
+  `400 Bad Request` line alone no longer has to be enough).
+- REST fallback: official query string `?includePending=true`, escaped account
+  id, dict-wrapped payloads, `id`-keyed entries, and `--verbose` dumps the raw
+  JSON so the real shape can be confirmed from one run.
+
+## [0.5.1] — 2026-08-30
+
+### Fixed
+
+- `neo friends -v` — the short form of `--verbose` that the release notes
+  documented now actually exists (0.5.0 shipped only the long flag).
+- SyntaxWarning on Python 3.12+: `to_winpath`'s docstring contained `C:\…`, an
+  invalid escape in a non-raw string. It is a raw docstring now, and a new
+  source-hygiene test tokenizes `neo` and fails on any invalid escape in any
+  non-raw string, on every Python the CI matrix runs.
+
+## [0.5.0] — 2026-08-30
+
+Social: `neo friends` speaks the official client's XMPP-over-websocket protocol
+directly — no library, stdlib only.
+
+### Added
+
+- `neo friends [--wait N] [--verbose]` — friends roster with display names and
+  live presence. Session per protocol.md §12: RFC 7395 open, SASL PLAIN
+  (authcid = account id, password = the account access token — confirmed from
+  the IL, there is no separate friends token), bind with the official
+  `neo_launcher_bind_` resource, roster iq, presence window, clean unavailable.
+  Falls back to `GET /friends/api/public/friends/{id}` when the websocket is
+  unreachable (no presence over the fallback). `NEO_XMPP` overrides the endpoint
+  (`ws://` accepted — capture proxies welcome); `--verbose` prints every stanza,
+  which doubles as the capture tool for correcting the doc against the live
+  service.
+- A minimal RFC 6455 websocket client (client-masked frames, ping/pong,
+  fragmentation, 16/64-bit lengths) as reusable functions plus `WsClient`.
+- Name resolution through the batch public-profile endpoint (50 ids per call).
+- `docs/protocol.md` §12 promoted from scoping notes to an implementation
+  record with the auth confirmed.
+
+### Notes
+
+- Live-service validation pending: the whole exchange is pinned by a
+  scripted-server test (`tests/test_friends.py`); the first `neo friends -v`
+  against production settles the last unknowns (bind-resource strictness, REST
+  payload shapes).
+
+## [0.4.0] — 2026-08-30
+
+The maintenance release: repair instead of reinstall, import instead of re-download,
+and the ability to wait out the access gate from the terminal. Nine new capabilities,
+all offline-tested (108 tests).
+
+### Added
+
+- `neo verify --repair` — missing/corrupt files are rebuilt by re-fetching only the
+  chunks they need (cache-first); the previous advice was a full 62 GB reinstall.
+- `neo import <path> <version>` — register a build folder that already exists on
+  disk (e.g. downloaded by the Windows launcher); fetches the manifest so `verify`
+  has something to check against. Mirrors the official client's `import_neo_build`.
+- `neo status --watch [--interval N]` — polls `fortniteAccess` (min 10 s) and fires
+  a desktop notification once granted. The official client checks once per start
+  and never re-checks (protocol.md gotcha 11) — this closes that gap in the CLI.
+- `neo news [--json]` — launcher news from the content service, defensively
+  formatted across payload shapes.
+- `neo uninstall [version] [--yes]` — deletes the build folder only when it still
+  carries neo's `.neo-manifest.json`, then drops the state entry.
+- `neo cache [stats|clear] [--all]` — visibility and cleanup for the bulk cache.
+- `neo log [-f] [-p PATH]` — locates `FortniteGame.log` under `WINEPREFIX` (or a
+  given path), highlights login/entitlement/error lines, `-f` tails live.
+- Install-time free-space preflight — cache and target volumes are checked against
+  worst-case need before any bytes move (engineering note 9, now a guard, not a
+  war story); `--force` overrides.
+- `main()` split so the parser is built by `make_parser()` — argument handling is
+  now unit-testable directly.
+
+### Fixed
+
+- `neo launch 10.40 -windowed` exits 2 no more: `extra` is now an argparse
+  REMAINDER, so flag-shaped UE4 arguments reach the game (options like `--dry-run`
+  must come before them; a `--` separator is also accepted). The limitation was
+  pinned by a test that now pins the fix instead.
+
+## [0.3.0] — 2026-08-30
+
+Diagnostics for the access gates. `neo status` now shows store entitlements,
+and the protocol doc gains a section on how the official launcher updates
+itself and decides who may play — read out of the decompiled NeoLauncher 1.0.7
+binary and its bundled web app, not guessed.
+
+### Added
+
+- `neo status`: "Entitlements" line — `GET store.neofn.dev/api/v1/entitlements/{id}`
+  summarised as offer ids, paid/refunded orders and subscriptions, so an
+  early-access purchase can be watched registering on the account. Best-effort:
+  failures warn and never abort the rest of the status output.
+- `docs/protocol.md` §11 "Launcher self-update and access gating": the Velopack
+  feed (`/api/public/releases`, client-credentials bearer) and the 30-minute
+  check-apply-restart cycle; the three playability gates (the per-account
+  `fortniteAccess` flag, the `["10.40"]` build allowlist baked into both the
+  DLL and the web bundle, and the in-game `PLAY` entitlement); the store
+  entitlements endpoint; a map of the WebView2 bridge. Established negative:
+  no launch-date or countdown logic exists anywhere in the client. Store and
+  analytics services added to the §1 table.
+
 ## [0.2.0] — 2026-08-29
 
 First public/repository release. Everything below validated live against production
@@ -115,11 +296,6 @@ Internal first cut; never released, so no tag or diff exists for it.
 
 ## Known issues
 
-- `neo launch` cannot pass extra UE4 command-line arguments. The `extra` positional
-  exists, but argparse rejects flag-shaped tokens after the subcommand, so
-  `neo launch 10.40 -windowed` exits 2 with `unrecognized arguments`. `--dry-run` and
-  `--proton` are unaffected. Pinned by `tests/test_cli.py::TestKnownLimitations` so the
-  changelog cannot quietly drift away from the code.
 - Playing still depends on NeoFN granting the `PLAY` entitlement; `neo launch` boots the
   client and logs it in, but the game stops at the entitlement check
   ([README → Status](README.md#status)).
