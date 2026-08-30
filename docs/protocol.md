@@ -340,6 +340,13 @@ neofn.dev.
 > match `GameLauncher.LaunchAsync` character-for-character, order included —
 > re-read from the DLL and pinned by `tests/test_cli.py::TestLaunchArgVector`.
 > The `-basedir` quoting remains the one deliberate deviation (§8.1).
+>
+> **Observed end-to-end on live hardware (2026-08-30, umu 1.4.3 /
+> Proton-CachyOS / ntsync):** the `/proc/…/cmdline` of the running launch
+> chain shows the vector intact — basedir unquoted and un-mangled, all
+> twelve flags in order, both exchange codes distinct — and the client
+> boots and auto-logins. The game exits cleanly at the entitlement wall
+> while `fortniteAccess` is false, as designed.
 
 Exact reproduction of `GameLauncher.LaunchAsync`.
 
