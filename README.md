@@ -69,7 +69,7 @@ Current release: **v0.5.3**.
 | Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
 | Playing | ⏳ waits on NeoFN granting account access + the `PLAY` entitlement (private testing as of v0.3.0) |
 
-✅ session live-validated 2026-08-30 against production (SASL PLAIN accepted, official bind resource accepted); roster/presence rendering confirmed against a scripted server and awaiting observation with a non-empty friends list.
+✅ live-validated 2026-08-30 against production, end to end: subprotocol, SASL PLAIN, bind, session, roster iq, presence echo. Rendering with a non-empty roster awaits someone to befriend once the service leaves private testing.
 | Store / early-access entitlement visibility (`neo status`) | ✅ |
 
 ## Requirements
