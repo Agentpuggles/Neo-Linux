@@ -485,9 +485,9 @@ commands over it. Notable: `launch_neo_build`, `import_neo_build`,
 
 ## 12. Friends over XMPP: scoping notes
 
-Scoped from the decompiled client, **not yet implemented in `neo`** — this section
-is what a `neo friends` command would have to speak. Recorded now because the
-findings are easy to lose and annoying to re-derive.
+Scoped from the decompiled client and implemented in `neo` as **`neo friends`**
+(v0.5.0) — validated against a scripted server; the live handshake still wants
+one on-line confirmation from a logged-in machine (`neo friends -v`).
 
 The official client does not use a library for this: `NeoLauncher.dll` contains a
 hand-rolled XMPP client (`NeoLauncher.Services.Friends.NeoXmppClient`, 35 methods)
@@ -500,7 +500,7 @@ speaking raw XML stanzas over a websocket.
 | Transport | websocket to `wss://xmpp-service-prod.neofn.dev` (`NeoPresenceService.EnsureConnectedAsync`) |
 | Session flow | `ConnectAsync` → `OpenStreamAsync` (RFC 7395 `<open>`/`<close>` framing) → `AuthenticateAsync` (SASL PLAIN) → `BindAsync` (`urn:ietf:params:xml:ns:xmpp-bind`) → `EstablishSessionAsync` (`xmpp-session`) → `RequestRosterAsync` (`jabber:iq:roster`) |
 | Bind resource | `neo_launcher_bind_{n}` (interlocked counter), presence resource `"launcher"` |
-| Auth | SASL **PLAIN** (`\x00authcid\x00password`, base64) — mechanism and separators are literals beside the stanza writer; the password slot is fed by `GetFriendsAccessTokenAsync`, a dedicated friends token distinct from the account access token |
+| Auth | SASL **PLAIN** (`\x00authcid\x00password`, base64): authcid = **account id**, password = the **account access token** (`GetFriendsAccessTokenAsync` just calls `AccountService.GetAccessTokenAsync` — there is no separate friends token) |
 | Events | `RawStanzaReceived` / `PresenceReceived` / `MessageReceived` / `Disconnected`; `LastInboundXml`/`LastOutboundXml` kept for debugging |
 | Presence model | `NeoPresenceView`: accountId, status, activity, gameStatus, resource, resourceType, priority; lifecycle published as the game starts/stops |
 | HTTP side | friends service `https://friends-public-service-prod.neofn.dev/friends` for roster/search/actions (add/remove, nicknames), so not everything needs XMPP |
@@ -511,11 +511,11 @@ speaking raw XML stanzas over a websocket.
    `socket`+ `ssl` + `base64` for the key, then a frame codec — client frames are
    never masked server-side, so the codec is small). ~150 lines, testable against
    a local socket pair.
-2. The XMPP details are no longer a mystery: SASL **PLAIN** with the two NUL
-   separators, RFC 7395 websocket framing, standard bind/session/roster IQs (all
-   literals in the stanza writer). The one live-capture item left is which exact
-   string PLAIN's password slot carries (friends-token vs account-token) and the
-   authcid format — `GetFriendsAccessTokenAsync` strongly implies the former.
+2. ~~Unknown~~ resolved: SASL **PLAIN**, authcid = account id, password = the
+   account access token (confirmed against the IL: `username`/`token` fields are
+   fed from `accountId` and `accessToken` at the `ConnectAsync` call site). The
+   remaining live-confirm items: whether the server requires the official bind
+   resource pattern, and the friends-REST payload shapes.
 3. Roster + presence state tracking, which the HTTP endpoints may make unnecessary
    for a read-only `neo friends` listing (roster over HTTP, presence over XMPP).
 4. A decision on backgrounding: presence publishing implies staying connected for
@@ -524,3 +524,15 @@ speaking raw XML stanzas over a websocket.
 Risk notes: the server may reject non-official bind resources or token types; and
 presence storms from polling reconnects would be antisocial — a snapshot client
 avoids both.
+
+### 12.3 Implementation (`neo friends`, v0.5.0)
+
+A ~10% RFC 6455 client (masked frames, ping/pong, fragmentation, extended
+lengths) plus the session above: open → PLAIN → re-open → bind
+(`neo_launcher_bind_1`, the official pattern) → session → roster iq →
+`<presence/>` → gather for `--wait` seconds (default 3) → unavailable → close.
+Display names come from the batch public-profile endpoint; if the websocket is
+unreachable the command falls back to `GET /friends/api/public/friends/{id}`
+(no presence). `NEO_XMPP` overrides the endpoint (plain `ws://` works, e.g. for
+a capture proxy). `--verbose` prints every stanza both ways — that output is
+the fastest way to correct this section against the live service.

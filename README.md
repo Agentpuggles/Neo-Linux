@@ -50,7 +50,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 
 ## Status
 
-Current release: **v0.4.0**.
+Current release: **v0.5.0**.
 
 | Feature | State |
 | --- | --- |
@@ -64,9 +64,12 @@ Current release: **v0.4.0**.
 | Access watch with desktop notification (`neo status --watch`) | ✅ |
 | Launcher news in the terminal (`neo news`) | ✅ |
 | Install-time disk preflight (cache + target checked before bytes move) | ✅ |
+| Friends roster + presence over XMPP (`neo friends`) | 🧪 |
 | Prism asset management (sha256-verified, auto-updated) | ✅ |
 | Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
 | Playing | ⏳ waits on NeoFN granting account access + the `PLAY` entitlement (private testing as of v0.3.0) |
+
+🧪 implemented and offline-tested against a scripted XMPP server; the live handshake still wants one confirmation run — `neo friends -v` from a logged-in machine.
 | Store / early-access entitlement visibility (`neo status`) | ✅ |
 
 ## Requirements
@@ -116,7 +119,7 @@ Interrupted installs resume — re-run the same command and cached chunks are re
 ```
 neo <command> [options]
 
-  account   login · whoami · setup · logout · status · news
+  account   login · whoami · setup · logout · status · news · friends
   game      list · install · import · verify · uninstall · launch
   system    cache · log · config               (see Configuration)
 ```
@@ -133,6 +136,7 @@ Run `neo <command> --help` for a command's own options.
 | `neo logout` | Drops the stored session (`auth.json` is emptied, not deleted). |
 | `neo status` | Lightswitch service status, ban status (both services), `fortniteAccess`, store entitlements, players online. `--watch` keeps polling until access is granted, then fires a desktop notification — the Windows launcher checks once per start and never re-checks, so this beats it to the punch. `--interval N` sets the period (min 10 s). |
 | `neo news` | Launcher news from the content service (`--json` for the raw payload). |
+| `neo friends` | Roster with display names and live presence, speaking the official client's own XMPP-over-websocket protocol (protocol.md §12): SASL PLAIN with the account id + access token, official bind resource. `--wait N` presence window, `--verbose` prints the raw stanzas. Falls back to the friends REST API when the websocket is unreachable. `NEO_XMPP` overrides the endpoint. |
 
 ### Game
 

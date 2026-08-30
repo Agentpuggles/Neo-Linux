@@ -56,6 +56,36 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.0] — 2026-08-30
+
+Social: `neo friends` speaks the official client's XMPP-over-websocket protocol
+directly — no library, stdlib only.
+
+### Added
+
+- `neo friends [--wait N] [--verbose]` — friends roster with display names and
+  live presence. Session per protocol.md §12: RFC 7395 open, SASL PLAIN
+  (authcid = account id, password = the account access token — confirmed from
+  the IL, there is no separate friends token), bind with the official
+  `neo_launcher_bind_` resource, roster iq, presence window, clean unavailable.
+  Falls back to `GET /friends/api/public/friends/{id}` when the websocket is
+  unreachable (no presence over the fallback). `NEO_XMPP` overrides the endpoint
+  (`ws://` accepted — capture proxies welcome); `--verbose` prints every stanza,
+  which doubles as the capture tool for correcting the doc against the live
+  service.
+- A minimal RFC 6455 websocket client (client-masked frames, ping/pong,
+  fragmentation, 16/64-bit lengths) as reusable functions plus `WsClient`.
+- Name resolution through the batch public-profile endpoint (50 ids per call).
+- `docs/protocol.md` §12 promoted from scoping notes to an implementation
+  record with the auth confirmed.
+
+### Notes
+
+- Live-service validation pending: the whole exchange is pinned by a
+  scripted-server test (`tests/test_friends.py`); the first `neo friends -v`
+  against production settles the last unknowns (bind-resource strictness, REST
+  payload shapes).
+
 ## [0.4.0] — 2026-08-30
 
 The maintenance release: repair instead of reinstall, import instead of re-download,

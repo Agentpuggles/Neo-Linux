@@ -9,17 +9,25 @@
 #   neo login                 Discord login (browser; neolauncher:// handler)
 #   neo whoami / logout       account info / drop session
 #   neo setup [name]          first-run display name
-#   neo status                service status + ban/access checks + online counts
+#   neo status [--watch]      service status + access/entitlements (--watch: wait)
+#   neo news                  launcher news from the content service
 #   neo list                  available builds
 #   neo config [k] [v]        settings: install_root, cache_dir, workers
 #   neo install [ver]         install a build (default: live)   -d DIR -j N
-#   neo verify [ver]          verify installed files (sha1)
+#   neo import <path> <ver>   register a build folder (no download)
+#   neo verify [ver] --repair fix missing/corrupt files only
+#   neo uninstall [ver]       remove an install (state + files)
+#   neo cache [stats|clear]   chunk-cache size / cleanup
 #   neo launch [ver] [-- args...]  run the game via umu-run
+#   neo friends               roster + presence over XMPP (--verbose: stanzas)
+#   neo log [-f]              show/tail the game's FortniteGame.log
 #
 # Env: NEO_HOME (data dir override), NEO_UMU (umu-run command, default "umu-run"),
+#      NEO_XMPP (XMPP websocket url, default wss://xmpp-service-prod.neofn.dev),
 #      WINEPREFIX (honored by umu-run).
 
 import argparse
+import base64
 import concurrent.futures as cf
 from datetime import datetime, timedelta, timezone
 import glob
@@ -29,6 +37,8 @@ import os
 import random
 import re
 import shutil
+import socket
+import ssl
 import string
 import struct
 import subprocess
@@ -38,9 +48,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -50,6 +61,8 @@ LIGHTSW  = "https://lightswitch-public-service-prod.neofn.dev/lightswitch"
 PRISM    = "https://prism-public-service-prod.neofn.dev/prism"
 STORE    = "https://store.neofn.dev/api/v1"
 CONTENT  = "https://fortnitecontent-website-prod07.neofn.dev/content/api"
+FRIENDS  = "https://friends-public-service-prod.neofn.dev/friends"
+XMPP_WS  = "wss://xmpp-service-prod.neofn.dev"
 CLIENT_ID = "8a4eeb89e05743fc9dba6fccb6766d35"
 CLIENT_SECRET = "7fe1392842624667b996d55ab5ebef03"
 REDIRECT_URI = "neolauncher://callback/auth"
@@ -1010,6 +1023,293 @@ def find_game_log(explicit=None):
     hits = glob.glob(os.path.join(prefix, *rel))
     return max(hits, key=os.path.getmtime) if hits else None
 
+# ---------------------------------------------------------------- friends (XMPP)
+# Reconstruction of NeoXmppClient (protocol.md §12): raw XMPP over a websocket,
+# SASL PLAIN with account id + the account access token, official-style bind
+# resource. NEO_XMPP overrides the endpoint (ws:// URLs work — handy for tests
+# and for pointing at a capture proxy).
+
+class WsError(Exception): pass
+
+def ws_build_text_frame(text, mask=None):
+    """One RFC 6455 text frame, masked as a client must."""
+    payload = text.encode("utf-8")
+    mask = os.urandom(4) if mask is None else mask
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    n = len(payload)
+    if n < 126:    head = struct.pack("!BB", 0x81, 0x80 | n)
+    elif n < 65536: head = struct.pack("!BBH", 0x81, 0x80 | 126, n)
+    else:           head = struct.pack("!BBQ", 0x81, 0x80 | 127, n)
+    return head + mask + masked
+
+def ws_parse_frame(buf):
+    """(fin, opcode, payload, consumed) for the first frame in buf, else None."""
+    if len(buf) < 2: return None
+    fin, opcode, masked, n = buf[0] & 0x80, buf[0] & 0x0F, buf[1] & 0x80, buf[1] & 0x7F
+    off = 2
+    if n == 126:
+        if len(buf) < 4: return None
+        n, off = int.from_bytes(buf[2:4], "big"), 4
+    elif n == 127:
+        if len(buf) < 10: return None
+        n, off = int.from_bytes(buf[2:10], "big"), 10
+    moff = off + 4 if masked else off
+    if len(buf) < moff + n: return None
+    data = buf[moff:moff + n]
+    if masked:
+        mk = buf[off:off + 4]
+        data = bytes(b ^ mk[i % 4] for i, b in enumerate(data))
+    return bool(fin), opcode, bytes(data), moff + n
+
+class WsClient:
+    """The ~10% of RFC 6455 an XMPP-over-websocket client needs."""
+
+    def __init__(self, url, timeout=15):
+        self.url, self.timeout = url, timeout
+        self.buf = b""
+
+    def connect(self):
+        u = urllib.parse.urlsplit(self.url)
+        tls = u.scheme == "wss"
+        host, port = u.hostname, u.port or (443 if tls else 80)
+        path = (u.path or "/") + ("?" + u.query if u.query else "")
+        sock = socket.create_connection((host, port), timeout=self.timeout)
+        if tls:
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+        self.sock = sock
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\n"
+                      f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                      f"Sec-WebSocket-Version: 13\r\nUser-Agent: {UA}\r\n\r\n").encode())
+        sock.settimeout(self.timeout)
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = sock.recv(4096)
+            if not chunk: raise WsError("websocket closed during handshake")
+            head += chunk
+            if len(head) > 65536: raise WsError("handshake response too large")
+        status = head.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+        if " 101 " not in status:
+            raise WsError(f"websocket handshake refused: {status}")
+        self.buf = head.split(b"\r\n\r\n", 1)[1]
+
+    def send(self, text):
+        self.sock.sendall(ws_build_text_frame(text))
+
+    def recv(self, timeout=None):
+        """Next text message; None on timeout. Ping→pong, close→WsError."""
+        self.sock.settimeout(self.timeout if timeout is None else max(timeout, 0.001))
+        parts = b""
+        while True:
+            frame = ws_parse_frame(self.buf)
+            while frame is None:
+                try:
+                    chunk = self.sock.recv(65536)
+                except socket.timeout:
+                    return None
+                if not chunk: raise WsError("websocket closed")
+                self.buf += chunk
+                frame = ws_parse_frame(self.buf)
+            fin, opcode, payload, consumed = frame
+            self.buf = self.buf[consumed:]
+            if opcode == 8: raise WsError("websocket close frame")
+            if opcode == 9:
+                self.sock.sendall(bytes([0x88, 0x80]) + os.urandom(4)); continue
+            if opcode == 10: continue
+            parts += payload
+            if fin: return parts.decode("utf-8", "replace")
+
+    def close(self):
+        try:
+            self.sock.sendall(bytes([0x88, 0x80]) + os.urandom(4))
+            self.sock.close()
+        except Exception:
+            pass
+
+def sasl_plain(username, token):
+    return base64.b64encode(("\0" + username + "\0" + token).encode()).decode()
+
+def parse_presence(frame):
+    if not frame.lstrip().startswith("<presence"): return None
+    m = re.search(r'from=["\']([^"\']+)', frame)
+    if not m: return None
+    d = {"from": m.group(1)}
+    for key, pat in (("type", r'type=["\']([^"\']+)'), ("show", r"<show>([^<]*)</show>"),
+                     ("status", r"<status>([^<]*)</status>")):
+        mm = re.search(pat, frame)
+        d[key] = mm.group(1) if mm else ""
+    return d
+
+def parse_roster(frame):
+    try:
+        root = xml.etree.ElementTree.fromstring(frame)
+    except Exception:
+        return []
+    items = []
+    for el in root.iter():
+        if el.tag == "item" or el.tag.endswith("}item"):
+            items.append({"jid": el.get("jid", ""), "name": el.get("name", ""),
+                          "subscription": el.get("subscription", "")})
+    return items
+
+def resolve_names(auth, account_ids):
+    """account id → display name, via the batch public-profile endpoint (§12.1)."""
+    out = {}
+    ids = [i for i in account_ids if i]
+    for i in range(0, len(ids), 50):
+        q = "&".join("accountId=" + urllib.parse.quote(a) for a in ids[i:i + 50])
+        try:
+            r = jhttp("GET", ACCOUNT + "/api/public/account?" + q,
+                      headers={"Authorization": "Bearer " + auth.access()})
+            for a in r if isinstance(r, list) else []:
+                if isinstance(a, dict) and a.get("id"):
+                    out[a["id"]] = a.get("displayName") or ""
+        except Exception:
+            pass
+    return out
+
+class XmppSession:
+    """The official client's flow: open → SASL PLAIN → re-open → bind → session."""
+
+    def __init__(self, account_id, token, verbose=False, url=None):
+        self.url = url or os.environ.get("NEO_XMPP") or XMPP_WS
+        self.account_id, self.token, self.verbose = account_id, token, verbose
+        self.last_sent = self.last_recv = ""
+        self.jid = ""
+        self.ws = None
+
+    def _send(self, stanza):
+        self.last_sent = stanza
+        if self.verbose: print("→", stanza)
+        self.ws.send(stanza)
+
+    def _read(self, timeout=None):
+        frame = self.ws.recv(timeout=timeout)
+        if frame is not None:
+            self.last_recv = frame
+            if self.verbose: print("←", frame)
+        return frame
+
+    def _recv(self, want, timeout=15):
+        deadline = time.time() + timeout
+        while True:
+            frame = self._read(timeout=max(deadline - time.time(), 0.001))
+            if frame is None:
+                raise WsError(f"timed out waiting for {want!r}; last exchange:\n"
+                              f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
+            if want in frame: return frame
+
+    def _recv_any(self, timeout):
+        deadline = time.time() + timeout
+        while True:
+            frame = self._read(timeout=max(deadline - time.time(), 0.001))
+            if frame is None:
+                raise WsError(f"timed out; last exchange:\n"
+                              f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
+            return frame
+
+    def _open(self):
+        host = urllib.parse.urlsplit(self.url).hostname
+        self._send(f'<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" '
+                   f'to="{host}" version="1.0"/>')
+        self._recv("<open")
+
+    def connect(self):
+        self.ws = WsClient(self.url)
+        self.ws.connect()
+        self._open()
+
+    def auth(self):
+        self._send('<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">'
+                   + sasl_plain(self.account_id, self.token) + "</auth>")
+        while True:
+            frame = self._recv_any(15)
+            if "success" in frame: break
+            if "failure" in frame:
+                raise WsError("SASL PLAIN rejected: " + frame[:300])
+        self._open()  # RFC 6120: the stream restarts after SASL
+
+    def bind(self):
+        self._send('<iq type="set" id="bind_1"><bind '
+                   'xmlns="urn:ietf:params:xml:ns:xmpp-bind">'
+                   "<resource>neo_launcher_bind_1</resource></bind></iq>")
+        m = re.search(r"<jid>([^<]+)</jid>", self._recv("</iq>"))
+        if m: self.jid = m.group(1)
+        self._send('<iq type="set" id="sess_1"><session '
+                   'xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>')
+        self._recv("</iq>")
+
+    def roster(self):
+        self._send('<iq type="get" id="ros_1"><query xmlns="jabber:iq:roster"/></iq>')
+        return self._recv("</iq>")
+
+    def presence_snapshot(self, wait=3.0):
+        """Go available, gather presence for `wait` seconds, go unavailable."""
+        self._send("<presence/>")
+        seen = {}
+        deadline = time.time() + wait
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0: break
+            frame = self._read(timeout=remaining)
+            if frame is None: break
+            p = parse_presence(frame)
+            if p: seen[p["from"]] = p
+        self._send('<presence type="unavailable"/>')
+        return seen
+
+def friends_http(auth):
+    """REST fallback when the websocket is unreachable (§12.1: /api/public/friends/)."""
+    r = jhttp("GET", FRIENDS + "/api/public/friends/" + auth.d["account_id"],
+              headers={"Authorization": "Bearer " + auth.access()})
+    out = []
+    for f in r if isinstance(r, list) else []:
+        if isinstance(f, dict) and f.get("accountId"):
+            out.append({"jid": f["accountId"], "name": f.get("displayName") or "",
+                        "subscription": f.get("status", "")})
+    return out
+
+def cmd_friends(args, auth):
+    if not auth.logged_in: err("Not logged in. Run: neo login"); sys.exit(1)
+    presence, transport, items = {}, "xmpp", []
+    sess = None
+    try:
+        sess = XmppSession(auth.d["account_id"], auth.access(), verbose=args.verbose)
+        sess.connect(); sess.auth(); sess.bind()
+        items = parse_roster(sess.roster())
+        presence = sess.presence_snapshot(args.wait)
+    except (WsError, OSError) as e:
+        detail = (f"; last exchange:\n  sent: {sess.last_sent[:200]}\n"
+                  f"  got:  {sess.last_recv[:200]}") \
+                 if sess and (sess.last_sent or sess.last_recv) else ""
+        warn(f"XMPP unavailable ({e}){detail}")
+        warn("falling back to the friends REST API (presence needs XMPP)")
+        try:
+            items = friends_http(auth)
+            transport = "http"
+        except Exception as e2:
+            err(f"friends REST also failed: {e2}"); sys.exit(1)
+    finally:
+        if sess and sess.ws:
+            try: sess.ws.close()
+            except Exception: pass
+    if not items:
+        ok("no friends on the roster"); return
+    fids = [i["jid"].split("@")[0].split("/")[0] for i in items]
+    names = resolve_names(auth, fids)
+    print(f"{len(items)} friend(s)  [transport: {transport}]")
+    for it in items:
+        fid = it["jid"].split("@")[0].split("/")[0]
+        name = it.get("name") or names.get(fid) or fid
+        pres = next((p for k, p in presence.items()
+                     if k.split("@")[0].split("/")[0] == fid), None)
+        if pres and pres.get("type") != "unavailable":
+            state = C("32", pres.get("show") or "online")
+        else:
+            state = C("2", it.get("subscription") or "offline")
+        extra = f"  {pres['status'][:40]}" if pres and pres.get("status") else ""
+        print(f"  {name:<24} {state}{extra}")
+
 def cmd_list(args, auth):
     for b in get_builds(auth):
         live = C("32", " [LIVE]") if b.get("isLive") else ""
@@ -1094,6 +1394,10 @@ def make_parser():
     s.add_argument("--proton")
     s.add_argument("extra", nargs=argparse.REMAINDER, metavar="args",
                    help="extra UE4 arguments (-windowed, -log, …); put options before these")
+    s = sub.add_parser("friends")
+    s.add_argument("--wait", type=float, default=3.0,
+                   help="seconds to collect presence (default 3)")
+    s.add_argument("--verbose", action="store_true", help="print the raw XMPP exchange")
     s = sub.add_parser("log")
     s.add_argument("-f", "--follow", action="store_true", help="tail like tail -f")
     s.add_argument("-p", "--path", help="explicit path to FortniteGame.log")
@@ -1117,6 +1421,7 @@ def main():
     if args.cmd == "uninstall": return cmd_uninstall(args)
     if args.cmd == "cache": return cmd_cache(args)
     if args.cmd == "launch": return cmd_launch(args, auth)
+    if args.cmd == "friends": return cmd_friends(args, auth)
     if args.cmd == "log": return cmd_log(args)
 
 if __name__ == "__main__":
