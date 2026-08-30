@@ -51,7 +51,7 @@ import urllib.request
 import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -1080,7 +1080,9 @@ class WsClient:
         key = base64.b64encode(os.urandom(16)).decode()
         sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\n"
                       f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
-                      f"Sec-WebSocket-Version: 13\r\nUser-Agent: {UA}\r\n\r\n").encode())
+                      f"Sec-WebSocket-Version: 13\r\n"
+                      f"Sec-WebSocket-Protocol: xmpp\r\n"  # required — 400 without
+                      f"User-Agent: {UA}\r\n\r\n").encode())
         sock.settimeout(self.timeout)
         head = b""
         while b"\r\n\r\n" not in head:
@@ -1090,7 +1092,15 @@ class WsClient:
             if len(head) > 65536: raise WsError("handshake response too large")
         status = head.split(b"\r\n", 1)[0].decode("utf-8", "replace")
         if " 101 " not in status:
-            raise WsError(f"websocket handshake refused: {status}")
+            body = head.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in head else b""
+            try:
+                self.sock.settimeout(1.0)
+                body += self.sock.recv(4096)
+            except Exception:
+                pass
+            detail = body.decode("utf-8", "replace").strip()
+            raise WsError(f"websocket handshake refused: {status}"
+                          + (f" — {detail[:200]}" if detail else ""))
         self.buf = head.split(b"\r\n\r\n", 1)[1]
 
     def send(self, text):
@@ -1258,16 +1268,25 @@ class XmppSession:
         self._send('<presence type="unavailable"/>')
         return seen
 
-def friends_http(auth):
-    """REST fallback when the websocket is unreachable (§12.1: /api/public/friends/)."""
-    r = jhttp("GET", FRIENDS + "/api/public/friends/" + auth.d["account_id"],
-              headers={"Authorization": "Bearer " + auth.access()})
+def friends_http(auth, raw=False):
+    """REST fallback when the websocket is unreachable (§12.1: /api/public/friends/).
+
+    Official query string included (?includePending=true); the payload may be a
+    bare list or wrapped, and friend entries key by accountId or id.
+    """
+    url = (FRIENDS + "/api/public/friends/"
+           + urllib.parse.quote(auth.d["account_id"]) + "?includePending=true")
+    r = jhttp("GET", url, headers={"Authorization": "Bearer " + auth.access()})
+    rows = r if isinstance(r, list) else []
+    if not rows and isinstance(r, dict):
+        rows = next((v for v in r.values() if isinstance(v, list)), [])
     out = []
-    for f in r if isinstance(r, list) else []:
-        if isinstance(f, dict) and f.get("accountId"):
-            out.append({"jid": f["accountId"], "name": f.get("displayName") or "",
-                        "subscription": f.get("status", "")})
-    return out
+    for f in rows:
+        if isinstance(f, dict) and (f.get("accountId") or f.get("id")):
+            out.append({"jid": f.get("accountId") or f.get("id"),
+                        "name": f.get("displayName") or "",
+                        "subscription": f.get("status") or f.get("friendshipStatus") or ""})
+    return (out, r) if raw else out
 
 def cmd_friends(args, auth):
     if not auth.logged_in: err("Not logged in. Run: neo login"); sys.exit(1)
@@ -1285,7 +1304,11 @@ def cmd_friends(args, auth):
         warn(f"XMPP unavailable ({e}){detail}")
         warn("falling back to the friends REST API (presence needs XMPP)")
         try:
-            items = friends_http(auth)
+            if args.verbose:
+                items, payload = friends_http(auth, raw=True)
+                print("REST payload:", json.dumps(payload)[:1500])
+            else:
+                items = friends_http(auth)
             transport = "http"
         except Exception as e2:
             err(f"friends REST also failed: {e2}"); sys.exit(1)

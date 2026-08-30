@@ -138,6 +138,7 @@ class ScriptedServer(threading.Thread):
         self.sock.listen(1)
         self.port = self.sock.getsockname()[1]
         self.seen = []
+        self.handshake = b""
 
     def run(self):
         try:
@@ -146,6 +147,7 @@ class ScriptedServer(threading.Thread):
             buf = b""
             while b"\r\n\r\n" not in buf:
                 buf += conn.recv(4096)
+            self.handshake = buf
             conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                          b"Connection: Upgrade\r\nSec-WebSocket-Accept: placeholder\r\n\r\n")
             buf = b""
@@ -175,6 +177,53 @@ class ScriptedServer(threading.Thread):
                 self.sock.close()
             except Exception:
                 pass
+
+
+class TestHandshake(unittest.TestCase):
+    def test_upgrade_requests_the_xmpp_subprotocol(self):
+        # found live: the edge answers 400 unless Sec-WebSocket-Protocol: xmpp
+        # is present (the official client calls AddSubProtocol("xmpp"))
+        server = ScriptedServer()
+        server.start()
+        with mock.patch.object(neo, "resolve_names", lambda a, ids: {}), \
+                support.environment(NEO_XMPP=f"ws://127.0.0.1:{server.port}"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            neo.cmd_friends(argparse.Namespace(verbose=False, wait=0.2), FakeAuth())
+        server.join(timeout=2)
+        self.assertIn(b"Sec-WebSocket-Protocol: xmpp\r\n", server.handshake)
+
+
+class TestRestFallback(unittest.TestCase):
+    def captured(self, payload):
+        box = {}
+
+        def fake_jhttp(method, url, body=None, headers=None, timeout=60):
+            box["url"] = url
+            return payload
+
+        return box, fake_jhttp
+
+    def test_official_query_string_and_wrapped_payload(self):
+        from unittest import mock
+
+        box, fake = self.captured({"friends": [{"accountId": "a1", "displayName": "Ann",
+                                                "status": "ACCEPTED"}]})
+        with mock.patch.object(neo, "jhttp", fake):
+            items = neo.friends_http(FakeAuth())
+        self.assertEqual(box["url"],
+                         neo.FRIENDS + "/api/public/friends/ACCT?includePending=true")
+        self.assertEqual(items, [{"jid": "a1", "name": "Ann", "subscription": "ACCEPTED"}])
+
+    def test_id_keying_and_raw_mode(self):
+        from unittest import mock
+
+        payload = [{"id": "b2", "displayName": "Bob", "friendshipStatus": "PENDING"}]
+        _, fake = self.captured(payload)
+        with mock.patch.object(neo, "jhttp", fake):
+            items, raw = neo.friends_http(FakeAuth(), raw=True)
+        self.assertEqual(items[0]["jid"], "b2")
+        self.assertEqual(items[0]["subscription"], "PENDING")
+        self.assertIs(raw, payload)
 
 
 class TestFriendsEndToEnd(unittest.TestCase):

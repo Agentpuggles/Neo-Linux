@@ -497,13 +497,13 @@ speaking raw XML stanzas over a websocket.
 
 | Piece | Observed in the binary |
 | --- | --- |
-| Transport | websocket to `wss://xmpp-service-prod.neofn.dev` (`NeoPresenceService.EnsureConnectedAsync`) |
+| Transport | websocket to `wss://xmpp-service-prod.neofn.dev` (`NeoPresenceService.EnsureConnectedAsync`), **requesting subprotocol `xmpp`** (`AddSubProtocol("xmpp")`) — the edge answers `400 Bad Request` without it (found live; fixed in `neo` 0.5.2) |
 | Session flow | `ConnectAsync` → `OpenStreamAsync` (RFC 7395 `<open>`/`<close>` framing) → `AuthenticateAsync` (SASL PLAIN) → `BindAsync` (`urn:ietf:params:xml:ns:xmpp-bind`) → `EstablishSessionAsync` (`xmpp-session`) → `RequestRosterAsync` (`jabber:iq:roster`) |
 | Bind resource | `neo_launcher_bind_{n}` (interlocked counter), presence resource `"launcher"` |
 | Auth | SASL **PLAIN** (`\x00authcid\x00password`, base64): authcid = **account id**, password = the **account access token** (`GetFriendsAccessTokenAsync` just calls `AccountService.GetAccessTokenAsync` — there is no separate friends token) |
 | Events | `RawStanzaReceived` / `PresenceReceived` / `MessageReceived` / `Disconnected`; `LastInboundXml`/`LastOutboundXml` kept for debugging |
 | Presence model | `NeoPresenceView`: accountId, status, activity, gameStatus, resource, resourceType, priority; lifecycle published as the game starts/stops |
-| HTTP side | friends service `https://friends-public-service-prod.neofn.dev/friends` for roster/search/actions (add/remove, nicknames), so not everything needs XMPP |
+| HTTP side | friends service `https://friends-public-service-prod.neofn.dev/friends` for roster/search/actions (add/remove, nicknames), so not everything needs XMPP; the roster call is `GET /api/public/friends/{id}?includePending=true` |
 
 ### 12.2 What `neo friends` would take
 

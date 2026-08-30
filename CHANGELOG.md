@@ -56,6 +56,23 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.2] — 2026-08-30
+
+First live run feedback (`neo friends -v` on a logged-in machine — thanks,
+flynn): the XMPP handshake was refused with `400 Bad Request`, and the REST
+fallback parsed to zero friends. Both causes found in the DLL and fixed.
+
+### Fixed
+
+- The websocket upgrade now sends `Sec-WebSocket-Protocol: xmpp` — the official
+  client calls `AddSubProtocol("xmpp")` before connecting and the edge rejects
+  the handshake without it. This was the `400`.
+- Handshake failures now include whatever body the server sent (a plain
+  `400 Bad Request` line alone no longer has to be enough).
+- REST fallback: official query string `?includePending=true`, escaped account
+  id, dict-wrapped payloads, `id`-keyed entries, and `--verbose` dumps the raw
+  JSON so the real shape can be confirmed from one run.
+
 ## [0.5.1] — 2026-08-30
 
 ### Fixed
