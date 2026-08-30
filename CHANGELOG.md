@@ -56,6 +56,17 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.1] — 2026-08-30
+
+### Fixed
+
+- `neo friends -v` — the short form of `--verbose` that the release notes
+  documented now actually exists (0.5.0 shipped only the long flag).
+- SyntaxWarning on Python 3.12+: `to_winpath`'s docstring contained `C:\…`, an
+  invalid escape in a non-raw string. It is a raw docstring now, and a new
+  source-hygiene test tokenizes `neo` and fails on any invalid escape in any
+  non-raw string, on every Python the CI matrix runs.
+
 ## [0.5.0] — 2026-08-30
 
 Social: `neo friends` speaks the official client's XMPP-over-websocket protocol

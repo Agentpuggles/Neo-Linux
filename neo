@@ -51,7 +51,7 @@ import urllib.request
 import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -782,7 +782,7 @@ def select_install(sel, st):
 
 # ---------------------------------------------------------------- launch
 def to_winpath(path, prefix=None):
-    """Map a unix path into the prefix's Windows namespace.
+    r"""Map a unix path into the prefix's Windows namespace.
 
     Anything inside <prefix>/drive_c becomes C:\...; everything else is reached
     through Wine's Z: drive. Paths inside the prefix must NOT be given as Z:
@@ -1397,7 +1397,7 @@ def make_parser():
     s = sub.add_parser("friends")
     s.add_argument("--wait", type=float, default=3.0,
                    help="seconds to collect presence (default 3)")
-    s.add_argument("--verbose", action="store_true", help="print the raw XMPP exchange")
+    s.add_argument("-v", "--verbose", action="store_true", help="print the raw XMPP exchange")
     s = sub.add_parser("log")
     s.add_argument("-f", "--follow", action="store_true", help="tail like tail -f")
     s.add_argument("-p", "--path", help="explicit path to FortniteGame.log")
