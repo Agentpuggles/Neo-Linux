@@ -50,7 +50,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 
 ## Status
 
-Current release: **v0.5.2**.
+Current release: **v0.5.3**.
 
 | Feature | State |
 | --- | --- |
@@ -64,12 +64,12 @@ Current release: **v0.5.2**.
 | Access watch with desktop notification (`neo status --watch`) | ✅ |
 | Launcher news in the terminal (`neo news`) | ✅ |
 | Install-time disk preflight (cache + target checked before bytes move) | ✅ |
-| Friends roster + presence over XMPP (`neo friends`) | 🧪 |
+| Friends roster + presence over XMPP (`neo friends`) | ✅ |
 | Prism asset management (sha256-verified, auto-updated) | ✅ |
 | Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
 | Playing | ⏳ waits on NeoFN granting account access + the `PLAY` entitlement (private testing as of v0.3.0) |
 
-🧪 implemented and offline-tested against a scripted XMPP server; the live handshake still wants one confirmation run — `neo friends -v` from a logged-in machine.
+✅ session live-validated 2026-08-30 against production (SASL PLAIN accepted, official bind resource accepted); roster/presence rendering confirmed against a scripted server and awaiting observation with a non-empty friends list.
 | Store / early-access entitlement visibility (`neo status`) | ✅ |
 
 ## Requirements

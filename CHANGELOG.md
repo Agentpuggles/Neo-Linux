@@ -56,6 +56,25 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.3] — 2026-08-30
+
+Live validation round two — the session now completes against production.
+
+### Fixed
+
+- iq replies are correlated by **id** (`id="sess_1"`), not by a literal closing
+  tag: the live server answers empty-bodied iqs self-closing
+  (`<iq type='result' id='sess_1'/>`), so waiting for `</iq>` timed out after
+  the server had already said yes. iq `type="error"` replies now raise with the
+  stanza attached. The scripted-server test replies mirror the production form.
+
+### Validated live (from the `-v` trace of a logged-in machine)
+
+- SASL PLAIN with authcid = account id and password = the account access token
+  — accepted; there is no separate friends token (matches the IL reading).
+- The server accepts the official `neo_launcher_bind_` resource pattern.
+- REST fallback payload at an empty roster is a bare `[]`.
+
 ## [0.5.2] — 2026-08-30
 
 First live run feedback (`neo friends -v` on a logged-in machine — thanks,

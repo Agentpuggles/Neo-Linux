@@ -485,9 +485,11 @@ commands over it. Notable: `launch_neo_build`, `import_neo_build`,
 
 ## 12. Friends over XMPP: scoping notes
 
-Scoped from the decompiled client and implemented in `neo` as **`neo friends`**
-(v0.5.0) — validated against a scripted server; the live handshake still wants
-one on-line confirmation from a logged-in machine (`neo friends -v`).
+Scoped from the decompiled client, implemented in `neo` as **`neo friends`**,
+and **live-validated against production (2026-08-30)**: subprotocol `xmpp`
+required, SASL PLAIN accepted with authcid = account id + the account access
+token, the official bind resource accepted. Server quirk worth knowing: replies
+to empty-bodied iqs are self-closing — correlate by iq id, never by `</iq>`.
 
 The official client does not use a library for this: `NeoLauncher.dll` contains a
 hand-rolled XMPP client (`NeoLauncher.Services.Friends.NeoXmppClient`, 35 methods)
