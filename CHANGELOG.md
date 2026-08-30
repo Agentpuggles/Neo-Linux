@@ -56,6 +56,31 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.4] — 2026-08-30
+
+Launch-day proof pass on the command line itself.
+
+### Added
+
+- The game argument vector is now pinned to the decompiled client: every base
+  flag, its order, the literal `-AUTH_LOGIN=unused`, and the fltoken charset
+  (a-z0-9, 24 chars) were re-read from `GameLauncher.LaunchAsync` in
+  NeoLauncher.dll and matched — a golden test (`TestLaunchArgVector`) fails if
+  either side drifts.
+
+### Changed
+
+- `fltoken` now uses `secrets.choice` (cryptographic), matching the official
+  client's `RandomNumberGenerator.GetString`; the argv construction moved into
+  `game_argv()`/`OFFICIAL_ARGS` so it is unit-testable.
+
+### Verified
+
+- All twelve base arguments are character-for-character identical to the
+  official client. The only deviation stays deliberate: `-basedir` unquoted,
+  because embedded quotes are re-escaped through the umu/wine boundary
+  (docs/protocol.md §8.1, engineering note 11).
+
 ## [0.5.3] — 2026-08-30
 
 Live validation round two — the session now completes against production.

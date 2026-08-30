@@ -336,6 +336,11 @@ neofn.dev.
 
 ## 8. Launch recipe
 
+> **Vector verified against the binary (0.5.4):** all twelve base arguments
+> match `GameLauncher.LaunchAsync` character-for-character, order included —
+> re-read from the DLL and pinned by `tests/test_cli.py::TestLaunchArgVector`.
+> The `-basedir` quoting remains the one deliberate deviation (§8.1).
+
 Exact reproduction of `GameLauncher.LaunchAsync`.
 
 | | |

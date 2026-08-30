@@ -389,3 +389,35 @@ class TestSourceHygiene(CliTestCase):
                 j = body.find(backslash, j + 2)
         self.assertEqual(offenders, [])
 
+
+
+class TestLaunchArgVector(CliTestCase):
+    """The launch command line, pinned to the decompiled official client.
+
+    Golden copy below is transcribed from GameLauncher.LaunchAsync in
+    NeoLauncher.dll 1.0.7 (IL 0x12AE79-0x12AF5C). If either side changes,
+    this test is the tripwire — update it only with a new DLL reading.
+    """
+
+    DLL_FLAGS = ("-epicapp=Fortnite", "-epicenv=Prod", "-epicportal",
+                 "-skippatchcheck", "-nobe", "-fromfl=eac",
+                 "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode")
+
+    def test_vector_matches_the_dll(self):
+        argv = neo.game_argv("C:\\g\\Win64", "CODE1", "CODE2", "tok123", ["-windowed"])
+        self.assertEqual(argv[0], "-basedir=C:\\g\\Win64")  # bare: see protocol 8.1
+        self.assertEqual(argv[1:9], list(self.DLL_FLAGS))
+        self.assertEqual(argv[9:12], ["-AUTH_PASSWORD=CODE1", "-p=CODE2",
+                                      "-fltoken=tok123"])
+        self.assertEqual(argv[12:], ["-windowed"])
+
+    def test_module_constants_agree_with_the_golden_copy(self):
+        self.assertEqual(list(neo.OFFICIAL_ARGS), list(self.DLL_FLAGS))
+
+    def test_fltoken_shape_matches_randomnumbergenerator_getstring(self):
+        import string
+
+        token = neo.fl_token()
+        self.assertEqual(len(token), 24)
+        self.assertTrue(set(token) <= set(string.ascii_lowercase + string.digits))
+        self.assertNotEqual(token, neo.fl_token())
