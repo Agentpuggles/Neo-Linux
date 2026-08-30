@@ -50,7 +50,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 
 ## Status
 
-Current release: **v0.5.4**.
+Current release: **v0.5.5**.
 
 | Feature | State |
 | --- | --- |

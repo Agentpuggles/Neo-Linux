@@ -51,7 +51,7 @@ import urllib.request
 import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -67,7 +67,8 @@ CLIENT_ID = "8a4eeb89e05743fc9dba6fccb6766d35"
 CLIENT_SECRET = "7fe1392842624667b996d55ab5ebef03"
 REDIRECT_URI = "neolauncher://callback/auth"
 GAME_EXE_NAME = "FortniteClient-Win64-Shipping.exe"
-LOG_HIGHLIGHT = re.compile(r"login|logout|entitle|PLAY|banned|denied|forbidden|error|fatal", re.I)
+# \bPLAY\b, bare: case-insensitive PLAY also matches every "Display:" line
+LOG_HIGHLIGHT = re.compile(r"login|logout|entitle|\bPLAY\b|banned|denied|forbidden|error|fatal", re.I)
 
 CHUNK_MAGIC = 0xB1FE3AA2
 CHUNK_HEADER_V2 = 62

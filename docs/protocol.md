@@ -397,6 +397,24 @@ exchange code
 So a login screen at this point usually means an **entitlement** problem, not an
 **authentication** one.
 
+### 9.1 Launch-day tripwire (baseline captured 2026-08-30)
+
+With `fortniteAccess: false`, the client's own log pins the exact sequence that
+changes the day access is granted (`neo log` highlights these lines):
+
+```
+Successfully logged in user … DisplayName=[…]          ← stays
+play IS allowed on this platform                       ← stays
+QueryAvailableFeature → 403 missing_action 'PLAY'      ← DISAPPEARS
+AbortLoggingIn [CheckEntitledToPlay] [LoginResult=20]  ← DISAPPEARS
+SignIn_Credentials panel pushed                        ← DISAPPEARS
+```
+
+The client re-checks the entitlement ~3 s after the first 403 before aborting,
+so a grant that lands mid-boot is still caught without a relaunch. Diff a new
+log against the pre-launch baseline (`neo log > baseline`) and those three
+absences are the whole signal.
+
 ## 10. Known ambiguities
 
 The format leaves a few places where a value's encoding can only be guessed from its
