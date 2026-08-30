@@ -331,11 +331,12 @@ next to the code they describe.
   `256`. The unguarded edge is a genuine plain int with 6, 9 or 12 digits —
   `parse_num("100000000")` returns `100`. Not observed in current manifests; recorded
   in [protocol.md §10](protocol.md#10-known-ambiguities).
-- **`neo launch` cannot forward extra UE4 arguments.** The `extra` positional exists
-  and `cmd_launch` appends it to the argv, but argparse rejects flag-shaped tokens
-  after the subcommand: `neo launch 10.40 -windowed` exits 2 with
-  `unrecognized arguments: -windowed`, and `-- -windowed` fails the same way.
-  `--dry-run` and `--proton` are unaffected. Tracked in the CHANGELOG's *Known issues*.
+- **`neo launch` could not forward extra UE4 arguments** — fixed in 0.4.0. The
+  `extra` positional used `nargs="*"`, so argparse rejected flag-shaped tokens:
+  `neo launch 10.40 -windowed` exited 2 with `unrecognized arguments: -windowed`.
+  It is now `nargs=argparse.REMAINDER` (options must precede the UE4 arguments);
+  the test that pinned the limitation (`TestKnownLimitations`) was rewritten to
+  pin the fix (`TestLaunchArgumentForwarding`).
 - **Note 5's own advice applies to this document.** The duplicate-tail corruption came
   from a fuzzy-matched edit on a 700-line script. These notes were added as whole new
   files rather than inserted into existing ones, and both were checked for duplicate

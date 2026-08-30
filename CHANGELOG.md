@@ -56,6 +56,42 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.4.0] — 2026-08-30
+
+The maintenance release: repair instead of reinstall, import instead of re-download,
+and the ability to wait out the access gate from the terminal. Nine new capabilities,
+all offline-tested (108 tests).
+
+### Added
+
+- `neo verify --repair` — missing/corrupt files are rebuilt by re-fetching only the
+  chunks they need (cache-first); the previous advice was a full 62 GB reinstall.
+- `neo import <path> <version>` — register a build folder that already exists on
+  disk (e.g. downloaded by the Windows launcher); fetches the manifest so `verify`
+  has something to check against. Mirrors the official client's `import_neo_build`.
+- `neo status --watch [--interval N]` — polls `fortniteAccess` (min 10 s) and fires
+  a desktop notification once granted. The official client checks once per start
+  and never re-checks (protocol.md gotcha 11) — this closes that gap in the CLI.
+- `neo news [--json]` — launcher news from the content service, defensively
+  formatted across payload shapes.
+- `neo uninstall [version] [--yes]` — deletes the build folder only when it still
+  carries neo's `.neo-manifest.json`, then drops the state entry.
+- `neo cache [stats|clear] [--all]` — visibility and cleanup for the bulk cache.
+- `neo log [-f] [-p PATH]` — locates `FortniteGame.log` under `WINEPREFIX` (or a
+  given path), highlights login/entitlement/error lines, `-f` tails live.
+- Install-time free-space preflight — cache and target volumes are checked against
+  worst-case need before any bytes move (engineering note 9, now a guard, not a
+  war story); `--force` overrides.
+- `main()` split so the parser is built by `make_parser()` — argument handling is
+  now unit-testable directly.
+
+### Fixed
+
+- `neo launch 10.40 -windowed` exits 2 no more: `extra` is now an argparse
+  REMAINDER, so flag-shaped UE4 arguments reach the game (options like `--dry-run`
+  must come before them; a `--` separator is also accepted). The limitation was
+  pinned by a test that now pins the fix instead.
+
 ## [0.3.0] — 2026-08-30
 
 Diagnostics for the access gates. `neo status` now shows store entitlements,
@@ -137,11 +173,6 @@ Internal first cut; never released, so no tag or diff exists for it.
 
 ## Known issues
 
-- `neo launch` cannot pass extra UE4 command-line arguments. The `extra` positional
-  exists, but argparse rejects flag-shaped tokens after the subcommand, so
-  `neo launch 10.40 -windowed` exits 2 with `unrecognized arguments`. `--dry-run` and
-  `--proton` are unaffected. Pinned by `tests/test_cli.py::TestKnownLimitations` so the
-  changelog cannot quietly drift away from the code.
 - Playing still depends on NeoFN granting the `PLAY` entitlement; `neo launch` boots the
   client and logs it in, but the game stops at the entitlement check
   ([README → Status](README.md#status)).
