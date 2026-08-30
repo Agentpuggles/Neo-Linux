@@ -22,11 +22,13 @@
 import argparse
 import concurrent.futures as cf
 from datetime import datetime, timedelta, timezone
+import glob
 import hashlib
 import json
 import os
 import random
 import re
+import shutil
 import string
 import struct
 import subprocess
@@ -38,7 +40,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -47,10 +49,12 @@ LAUNCHER = "https://launcher-public-service-prod06.neofn.dev/launcher"
 LIGHTSW  = "https://lightswitch-public-service-prod.neofn.dev/lightswitch"
 PRISM    = "https://prism-public-service-prod.neofn.dev/prism"
 STORE    = "https://store.neofn.dev/api/v1"
+CONTENT  = "https://fortnitecontent-website-prod07.neofn.dev/content/api"
 CLIENT_ID = "8a4eeb89e05743fc9dba6fccb6766d35"
 CLIENT_SECRET = "7fe1392842624667b996d55ab5ebef03"
 REDIRECT_URI = "neolauncher://callback/auth"
 GAME_EXE_NAME = "FortniteClient-Win64-Shipping.exe"
+LOG_HIGHLIGHT = re.compile(r"login|logout|entitle|PLAY|banned|denied|forbidden|error|fatal", re.I)
 
 CHUNK_MAGIC = 0xB1FE3AA2
 CHUNK_HEADER_V2 = 62
@@ -105,6 +109,14 @@ def human(n):
     for u in ("B", "KiB", "MiB", "GiB", "TiB"):
         if n < 1024 or u == "TiB": return f"{n:.1f} {u}" if u != "B" else f"{int(n)} B"
         n /= 1024
+
+def notify(title, message):
+    """Desktop notification, best-effort (no notify-send, no DE → silent no-op)."""
+    try:
+        subprocess.run(["notify-send", "-a", "neo", title, message], timeout=5,
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------- http
 def http(method, url, body=None, headers=None, timeout=60, retries=3):
@@ -257,6 +269,46 @@ def describe_entitlements(ent):
     if orders: bits.append(f"{len(paid)}/{len(orders)} orders paid")
     if subs:   bits.append(f"{len(subs)} subscription(s)")
     return "; ".join(bits) if bits else "none on file"
+
+def fortnite_access(auth):
+    return jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"]
+                 + "/fortniteAccess", headers={"Authorization": "Bearer " + auth.access()})
+
+def get_news():
+    # content service, no auth; the official client reads both shapes (§1)
+    for path in ("/launcher/news", "/pages/fortnite-game"):
+        try:
+            return jhttp("GET", CONTENT + path)
+        except Exception:
+            continue
+    raise RuntimeError("news unavailable from " + CONTENT)
+
+def first_of(d, *keys):
+    low = {str(k).lower(): v for k, v in d.items()}
+    for k in keys:
+        v = low.get(k.lower())
+        if v: return v
+    return None
+
+def format_news(payload):
+    """News payloads vary; surface anything list-like of dicts with a title-ish field."""
+    items = payload if isinstance(payload, list) else []
+    if isinstance(payload, dict):
+        for v in payload.values():
+            if isinstance(v, list) and v and all(isinstance(i, dict) for i in v):
+                items = v
+                break
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        title = first_of(it, "title", "headline", "name")
+        body = first_of(it, "message", "body", "description", "content")
+        date = first_of(it, "date", "publishedat", "timestamp")
+        if not (title or body):
+            continue
+        out.append((str(date or ""), str(title or "(untitled)"), str(body or "").strip()[:200]))
+    return out
 
 # ---------------------------------------------------------------- manifest
 def blob_to_bytes(s):
@@ -418,6 +470,23 @@ def pick_build(builds, sel):
 
 def version_dir_name(version): return version
 
+def free_space_shortages(needs):
+    """[(path, free, needed)] for each (path, needed-bytes) whose volume is short.
+
+    Engineering note 9: an install that fills the system disk mid-download is a
+    bug, not a footgun — so both bulk paths are checked up front, before any
+    bytes move. Unstat-able paths are left to fail later with a clearer error.
+    """
+    shortages = []
+    for path, need in needs:
+        try:
+            free = shutil.disk_usage(path).free
+        except OSError:
+            continue
+        if free < need:
+            shortages.append((path, free, need))
+    return shortages
+
 def cmd_install(args, auth):
     cfg = load_config()
     builds = get_builds(auth)
@@ -440,6 +509,16 @@ def cmd_install(args, auth):
     needed = sorted({g for f in m.files for g, _, _ in f["parts"]})
     total = sum(m.chunks.get(g, {}).get("size", 0) for g in needed)
     print(f"{len(m.files)} files, {len(needed)} chunks ({human(total)} download worst-case)")
+    total_raw = sum(size for f in m.files for _, _, size in f["parts"])
+    if not getattr(args, "force", False):
+        short = free_space_shortages([(cache_dir(), total), (inst_dir, total_raw)])
+        for path, free, need in short:
+            err(f"not enough space for {os.path.dirname(path) or path}: "
+                f"{human(free)} free, {human(need)} needed")
+        if short:
+            err("move the cache (neo config cache_dir) or install elsewhere (-d DIR); "
+                "override with --force")
+            sys.exit(1)
 
     stats = {"dl": 0, "reuse": 0}
     chunk_cache = {}
@@ -530,24 +609,148 @@ def cmd_verify(args, auth):
     print(f"Verifying {version} at {inst['path']}")
     with open(os.path.join(inst["path"], ".neo-manifest.json")) as f:
         m = Manifest(json.load(f))
-    bad = missing = 0
+    bad, missing = [], []
     with Progress(len(m.files), "files") as pr:
         for f in m.files:
             p = os.path.join(inst["path"], f["name"])
             if f["symlink"]:
-                if not os.path.islink(p): missing += 1
+                if not os.path.islink(p): missing.append(f)
             elif not os.path.exists(p):
-                missing += 1
+                missing.append(f)
             else:
                 h = hashlib.sha1()
                 with open(p, "rb") as fh:
                     for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
-                if f["sha1"] and h.hexdigest() != f["sha1"]: bad += 1
+                if f["sha1"] and h.hexdigest() != f["sha1"]: bad.append(f)
             pr.add(1)
-    if missing or bad:
-        warn(f"{missing} missing, {bad} corrupted — repair with: neo install {version}")
-    else:
+    if not missing and not bad:
         ok("all files verified")
+        return
+    warn(f"{len(missing)} missing, {len(bad)} corrupted")
+    if not getattr(args, "repair", False):
+        warn(f"repair with: neo verify {version} --repair")
+        return
+    repair_files(inst["path"], missing + bad, m)
+
+def repair_files(inst_path, files, m):
+    """Re-fetch only the chunks the broken files need, rebuild, re-hash."""
+    clouds = get_distribution_points()
+    if not clouds:
+        err("no distribution points — cannot repair"); sys.exit(1)
+    cloud = clouds[0]
+    stats = {"dl": 0, "reuse": 0}
+    cache_map = {}
+    fixed = failed = 0
+    with Progress(len(files), "repairing", counts=True) as pr:
+        for f in files:
+            try:
+                for guid, _off, _size in f["parts"]:
+                    if guid not in cache_map:
+                        cache_map[guid] = fetch_chunk(cloud, m, guid, stats)
+                assemble_file(inst_path, f, cache_map, cloud, m)
+                if not f["symlink"]:
+                    h = hashlib.sha1()
+                    with open(install_path(inst_path, f["name"]), "rb") as fh:
+                        for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
+                    if f["sha1"] and h.hexdigest() != f["sha1"]:
+                        raise RuntimeError("sha1 still mismatched after rebuild")
+                fixed += 1
+            except Exception as e:
+                failed += 1
+                err(f"  {f['name']}: {e}")
+            pr.add(1)
+    print(f"  chunks: {stats['dl']} downloaded, {stats['reuse']} reused from cache")
+    if failed:
+        err(f"{failed} file(s) still failing"); sys.exit(1)
+    ok(f"repaired {fixed} file(s)")
+
+def cmd_import(args, auth):
+    """Register a build folder that already exists on disk (no download).
+
+    Mirrors the official client's import_neo_build: the folder must be a build
+    root (contains FortniteGame/ and Engine/). The manifest is fetched so later
+    `neo verify` runs have something to check against.
+    """
+    path = os.path.abspath(os.path.expanduser(args.path))
+    for sub in ("FortniteGame", "Engine"):
+        if not os.path.isdir(os.path.join(path, sub)):
+            err(f"{path} does not look like a build root (no {sub}/)")
+            err("pick the folder that contains FortniteGame/ and Engine/")
+            sys.exit(1)
+    builds = get_builds(auth)
+    build = pick_build(builds, args.version)
+    version = build["version"]
+    clouds = get_distribution_points()
+    if not clouds:
+        err("no distribution points — cannot fetch the manifest"); sys.exit(1)
+    m = load_manifest(version, clouds[0] + "/" + build["manifestPath"].lstrip("/"))
+    with open(os.path.join(path, ".neo-manifest.json"), "w") as fh:
+        json.dump(m.d, fh)
+    st = load_state()
+    st["installs"][version] = {"path": path, "build": build, "imported": True}
+    save_state(st)
+    ok(f"registered {version} → {path}")
+    print(f"check it with: neo verify {version}")
+
+def cmd_uninstall(args):
+    st = load_state()
+    version, inst = select_install(args.version, st)
+    path = inst["path"]
+    print(f"Uninstalling {version}\n  {path}")
+    if os.path.isdir(path):
+        # only rmtree directories that still carry our manifest — never whatever
+        # a hand-edited state.json might point at
+        if not os.path.exists(os.path.join(path, ".neo-manifest.json")):
+            err(f"refusing: no .neo-manifest.json in {path} (not a neo install?)")
+            err("dropping the state entry only; delete the folder by hand")
+            st["installs"].pop(version, None)
+            save_state(st)
+            sys.exit(1)
+        if not getattr(args, "yes", False):
+            try:
+                ans = input(f"type 'remove' to delete {path}: ")
+            except EOFError:
+                ans = ""
+            if ans.strip().lower() != "remove":
+                err("aborted (use --yes to skip the prompt)")
+                sys.exit(1)
+        shutil.rmtree(path)
+    else:
+        warn("install directory already gone — dropping the state entry")
+    st["installs"].pop(version, None)
+    save_state(st)
+    ok(f"removed {version}")
+
+def cmd_cache(args):
+    action = (args.action or "stats").lower()
+    cache = cache_dir()
+    if action == "clear":
+        subs = ["chunks", "manifests"] if getattr(args, "all", False) else ["chunks"]
+        removed = freed = 0
+        for sub in subs:
+            d = os.path.join(cache, sub)
+            for name in os.listdir(d) if os.path.isdir(d) else []:
+                p = os.path.join(d, name)
+                try:
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+                    removed += 1
+                except OSError:
+                    pass
+        ok(f"removed {removed} file(s), {human(freed)} freed ({cache})")
+        return
+    for sub in ("chunks", "manifests"):
+        d = os.path.join(cache, sub)
+        n = size = 0
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                try:
+                    size += os.path.getsize(os.path.join(d, name))
+                    n += 1
+                except OSError:
+                    pass
+        print(f"{sub:<10} {n:>7} file(s)  {human(size):>10}")
+    print(f"cache dir: {cache}")
 
 def changelist_number(version):
     """Build version string -> its CL number (0 when absent), for newest-wins sorting."""
@@ -634,6 +837,9 @@ def cmd_launch(args, auth):
     fltoken = "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
 
     basedir_win = to_winpath(win64)
+    extra = list(args.extra or [])
+    if extra and extra[0] == "--":
+        extra = extra[1:]  # allow the `neo launch 10.40 -- -windowed` spelling too
     argv = [
         # bare (unquoted) basedir: through umu/wine the quotes get escaped to \"
         # and UE4's parser leaves a stray backslash, mangling the path
@@ -642,7 +848,7 @@ def cmd_launch(args, auth):
         "-skippatchcheck", "-nobe", "-fromfl=eac",
         "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode",
         "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken,
-        *(args.extra or []),
+        *extra,
     ]
 
     umu = os.environ.get("NEO_UMU", "umu-run")
@@ -699,12 +905,7 @@ def cmd_login(args):
             msg = f"Login failed: {e}"
             err(msg)
         # callback runs with no terminal (launched by the DE) — notify the user
-        try:
-            subprocess.run(["notify-send", "-a", "neo", "NeoFN login", msg],
-                           timeout=5, check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        notify("NeoFN login", msg)
         sys.exit(0 if auth.logged_in else 1)
     if args.code:
         auth.login_code(args.code)
@@ -732,9 +933,7 @@ def cmd_status(args, auth):
             print(f"Prism ban        : {'yes — ' + str(b.get('reason')) if b.get('banned') else 'no'}")
         except Exception as e: warn(f"prism: {e}")
         try:
-            fa = jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"]
-                       + "/fortniteAccess", headers={"Authorization": "Bearer " + auth.access()})
-            print(f"Fortnite access  : {fa}")
+            print(f"Fortnite access  : {fortnite_access(auth)}")
         except Exception as e: warn(f"fortniteAccess: {e}")
         try:
             print("Entitlements     :", describe_entitlements(store_entitlements(auth)))
@@ -743,6 +942,73 @@ def cmd_status(args, auth):
         oc = jhttp("GET", LAUNCHER + "/api/public/onlinecount")
         print(f"Players online   : {oc}")
     except Exception: pass
+    if getattr(args, "watch", False):
+        if not auth.logged_in:
+            err("--watch needs a logged-in account (fortniteAccess is per-account)")
+            sys.exit(1)
+        interval = max(10, getattr(args, "interval", 0) or 60)
+        print(f"watching for access every {interval}s — Ctrl-C to stop")
+        while True:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            try:
+                granted = fortnite_access(auth)
+            except Exception as e:
+                granted = None
+                warn(f"[{stamp}] fortniteAccess unreachable ({e})")
+            if granted:
+                ok(f"[{stamp}] fortniteAccess: granted — run: neo launch")
+                notify("Neo access granted", "fortniteAccess flipped to true — run: neo launch")
+                return
+            print(f"[{stamp}] fortniteAccess: "
+                  f"{granted if granted is not None else 'unreachable'}", flush=True)
+            time.sleep(interval)
+
+def cmd_news(args):
+    payload = get_news()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=1)[:8000])
+        return
+    items = format_news(payload)
+    if not items:
+        warn("no news items found — raw payload with: neo news --json")
+        return
+    for date, title, body in items:
+        print(f"{C('2', date + ' ')}{C('1', title)}")
+        if body: print(f"  {body}")
+
+def cmd_log(args):
+    path = args.path or find_game_log()
+    if not path or not os.path.exists(path):
+        err("no FortniteGame.log found — pass -p /path/to/FortniteGame.log")
+        err("hint: <WINEPREFIX>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/")
+        sys.exit(1)
+    print(C("2", path))
+    def show(line):
+        print(LOG_HIGHLIGHT.sub(lambda m: C("33", m.group(0)), line.rstrip("\n")))
+    with open(path, encoding="utf-8", errors="replace") as f:
+        if args.follow:
+            for line in f.readlines()[-80:]:
+                show(line)
+            while True:            # tail -f: the KeyboardInterrupt handler exits cleanly
+                line = f.readline()
+                if line:
+                    show(line)
+                else:
+                    time.sleep(0.5)
+        else:
+            for line in f:
+                show(line)
+
+def find_game_log(explicit=None):
+    if explicit:
+        return explicit
+    prefix = os.environ.get("WINEPREFIX")
+    if not prefix:
+        return None
+    rel = ["drive_c", "users", "*", "AppData", "Local",
+           "FortniteGame", "Saved", "Logs", "FortniteGame.log"]
+    hits = glob.glob(os.path.join(prefix, *rel))
+    return max(hits, key=os.path.getmtime) if hits else None
 
 def cmd_list(args, auth):
     for b in get_builds(auth):
@@ -793,7 +1059,7 @@ def cmd_setup(args, auth):
     ok(f"display name set: {confirmed}")
 
 # ---------------------------------------------------------------- main
-def main():
+def make_parser():
     p = argparse.ArgumentParser(prog="neo", description="NeoFN Linux launcher")
     p.add_argument("--version", action="version", version=VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -801,30 +1067,57 @@ def main():
     s = sub.add_parser("whoami")
     s = sub.add_parser("setup"); s.add_argument("name", nargs="?")
     sub.add_parser("logout")
-    sub.add_parser("status")
+    s = sub.add_parser("status")
+    s.add_argument("--watch", action="store_true",
+                   help="keep polling until fortniteAccess is granted, then notify and exit")
+    s.add_argument("--interval", type=int, default=60, help="poll period in seconds (min 10)")
+    s = sub.add_parser("news"); s.add_argument("--json", action="store_true",
+                                               help="dump the raw payload")
     sub.add_parser("list")
     s = sub.add_parser("config"); s.add_argument("key", nargs="?"); s.add_argument("value", nargs="?")
     s = sub.add_parser("install"); s.add_argument("version", nargs="?")
     s.add_argument("-d", "--dir"); s.add_argument("-j", "--jobs", type=int)
     s.add_argument("--keep-cache", action="store_true",
                    help="keep downloaded chunks after install (enables offline repair, uses ~build-size disk)")
+    s.add_argument("--force", action="store_true", help="skip the free-space preflight")
+    s = sub.add_parser("import"); s.add_argument("path"); s.add_argument("version",
+                   help="catalog version of the build, e.g. 10.40")
     s = sub.add_parser("verify"); s.add_argument("version", nargs="?")
+    s.add_argument("--repair", action="store_true",
+                   help="re-fetch and rebuild only missing/corrupt files")
+    s = sub.add_parser("uninstall"); s.add_argument("version", nargs="?")
+    s.add_argument("--yes", action="store_true", help="skip the removal prompt")
+    s = sub.add_parser("cache"); s.add_argument("action", nargs="?", choices=["stats", "clear"])
+    s.add_argument("--all", action="store_true", help="clear also cached manifests")
     s = sub.add_parser("launch"); s.add_argument("version", nargs="?")
     s.add_argument("--dry-run", action="store_true")
-    s.add_argument("--proton"); s.add_argument("extra", nargs="*")
-    args = p.parse_args()
+    s.add_argument("--proton")
+    s.add_argument("extra", nargs=argparse.REMAINDER, metavar="args",
+                   help="extra UE4 arguments (-windowed, -log, …); put options before these")
+    s = sub.add_parser("log")
+    s.add_argument("-f", "--follow", action="store_true", help="tail like tail -f")
+    s.add_argument("-p", "--path", help="explicit path to FortniteGame.log")
+    return p
+
+def main():
+    args = make_parser().parse_args()
 
     auth = Auth()
     if args.cmd == "login": return cmd_login(args)
     if args.cmd == "logout": auth.logout(); return ok("logged out")
     if args.cmd == "status": return cmd_status(args, auth)
+    if args.cmd == "news": return cmd_news(args)
     if args.cmd == "list": return cmd_list(args, auth)
     if args.cmd == "whoami": return cmd_whoami(args, auth)
     if args.cmd == "setup": return cmd_setup(args, auth)
     if args.cmd == "config": return cmd_config(args)
     if args.cmd == "install": return cmd_install(args, auth)
+    if args.cmd == "import": return cmd_import(args, auth)
     if args.cmd == "verify": return cmd_verify(args, auth)
+    if args.cmd == "uninstall": return cmd_uninstall(args)
+    if args.cmd == "cache": return cmd_cache(args)
     if args.cmd == "launch": return cmd_launch(args, auth)
+    if args.cmd == "log": return cmd_log(args)
 
 if __name__ == "__main__":
     try:

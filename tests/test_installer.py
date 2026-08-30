@@ -3,15 +3,17 @@
 import contextlib
 import hashlib
 import io
+import json
 import os
 import pathlib
 import shutil
 import stat
 import tempfile
 import unittest
+import unittest.mock
 
 from tests import support
-from tests.support import build_chunk, neo
+from tests.support import build_chunk, manifest_dict, neo
 
 
 @contextlib.contextmanager
@@ -198,3 +200,129 @@ class TestHuman(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFreeSpacePreflight(unittest.TestCase):
+    """Engineering note 9, turned into a guard: both bulk paths are checked first."""
+
+    def test_short_and_ok_volumes(self):
+        from unittest import mock
+
+        fake = {"full": 100, "fine": 1 << 40}
+
+        def disk_usage(path):
+            class U:
+                pass
+
+            u = U()
+            u.free = fake[path]
+            return u
+
+        with mock.patch.object(neo.shutil, "disk_usage", disk_usage):
+            self.assertEqual(neo.free_space_shortages([("full", 200), ("fine", 500)]),
+                             [("full", 100, 200)])
+            self.assertEqual(neo.free_space_shortages([("fine", 500)]), [])
+
+    def test_unstatable_paths_are_skipped(self):
+        from unittest import mock
+
+        with mock.patch.object(neo.shutil, "disk_usage",
+                               side_effect=OSError("no such volume")):
+            self.assertEqual(neo.free_space_shortages([("/gone", 1)]), [])
+
+
+class TestImport(unittest.TestCase):
+    def setUp(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="import-", dir=str(support.SANDBOX)))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        stack = contextlib.ExitStack()
+        stack.enter_context(support.environment(NEO_HOME=str(tmp / "share"),
+                                                NEO_CACHE=str(tmp / "cache")))
+        self.addCleanup(stack.close)
+        self.home = tmp
+
+    def make_build_root(self, complete=True):
+        root = self.home / "build"
+        (root / "FortniteGame" / "Binaries").mkdir(parents=True)
+        if complete:
+            (root / "Engine").mkdir()
+        return root
+
+    def test_import_registers_state_and_writes_manifest(self):
+        import argparse
+
+        root = self.make_build_root()
+        with quiet(), unittest.mock.patch.object(neo, "get_builds", lambda a: sample_builds()), \
+                 unittest.mock.patch.object(neo, "get_distribution_points",
+                                        lambda: ["https://cdn.example"]), \
+                 unittest.mock.patch.object(neo, "load_manifest",
+                                        lambda v, u: neo.Manifest(manifest_dict())):
+            neo.cmd_import(argparse.Namespace(path=str(root), version="10.40"), None)
+        state = json.loads((self.home / "share" / "state.json").read_text())
+        (version, entry), = state["installs"].items()
+        self.assertIn("10.40", version)
+        self.assertTrue(entry["imported"])
+        self.assertEqual(entry["path"], str(root))
+        self.assertTrue((root / ".neo-manifest.json").exists())
+
+    def test_import_rejects_dirs_that_are_not_build_roots(self):
+        import argparse
+
+        root = self.make_build_root(complete=False)
+        with quiet(), self.assertRaises(SystemExit):
+            neo.cmd_import(argparse.Namespace(path=str(root), version="10.40"), None)
+
+
+class TestVerifyRepair(unittest.TestCase):
+    def setUp(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="repair-", dir=str(support.SANDBOX)))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        stack = contextlib.ExitStack()
+        stack.enter_context(support.environment(NEO_HOME=str(tmp / "share"),
+                                                NEO_CACHE=str(tmp / "cache")))
+        self.addCleanup(stack.close)
+        self.home = tmp
+        self.m = neo.Manifest(manifest_dict())
+        self.inst_dir = tmp / "inst"
+        self.inst_dir.mkdir()
+        payload = b"neo test payload"
+        guid = next(iter(self.m.chunks))
+        with quiet():
+            neo.assemble_file(str(self.inst_dir), self.m.files[0], {guid: payload},
+                              "https://cdn.example", self.m)
+        with open(self.inst_dir / ".neo-manifest.json", "w") as fh:
+            json.dump(self.m.d, fh)
+        state = {"installs": {"++Fortnite+Release-10.40-CL-9380822":
+                              {"path": str(self.inst_dir)}}}
+        (self.home / "share").mkdir()
+        (self.home / "share" / "state.json").write_text(json.dumps(state))
+
+    def target(self):
+        return self.inst_dir / "FortniteGame" / "Binaries" / "Win64" / \
+            "FortniteClient-Win64-Shipping.exe"
+
+    def test_corrupt_file_is_repaired_from_cached_chunks(self):
+        import argparse
+
+        raw, _sha = build_chunk(b"neo test payload",
+                                guid=next(iter(self.m.chunks)),
+                                rolling_hash=0x487A33F0F2E5F569)
+        support.cache_chunk(next(iter(self.m.chunks)), raw)
+        self.target().write_bytes(b"corrupted!")  # sha1 no longer matches
+
+        with quiet(), unittest.mock.patch.object(neo, "get_distribution_points",
+                                        lambda: ["https://cdn.example"]):
+            neo.cmd_verify(argparse.Namespace(version=None, repair=True), None)
+
+        digest = hashlib.sha1(self.target().read_bytes()).hexdigest()
+        self.assertEqual(digest, self.m.files[0]["sha1"])
+
+    def test_without_repair_it_only_suggests(self):
+        import argparse
+
+        self.target().unlink()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            neo.cmd_verify(argparse.Namespace(version=None, repair=False), None)
+        self.assertFalse(self.target().exists())  # nothing was fetched
+        self.assertIn("--repair", buf.getvalue())

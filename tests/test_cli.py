@@ -150,18 +150,201 @@ class TestConfigCommand(CliTestCase):
         self.assertIn(str(self.home / "bulk"), support.run_cli("config"))
 
 
-class TestKnownLimitations(CliTestCase):
-    """Pins the behaviour recorded in CHANGELOG.md → Known issues.
+class TestLaunchArgumentForwarding(CliTestCase):
+    """Fixed in 0.4.0: flag-shaped UE4 arguments reach the game (CHANGELOG → Added).
 
-    `neo launch <ver> -windowed` cannot reach the game yet: argparse rejects
-    flag-shaped tokens after the subcommand. If this test starts failing, the
-    limitation was fixed — update the changelog and the README table with it.
+    `extra` is an argparse REMAINDER: options (--dry-run, --proton) must come
+    before the first UE4 argument, and a leading `--` separator is stripped.
     """
 
-    def test_extra_ue4_arguments_are_rejected_at_parse_time(self):
-        text = support.run_cli("launch", "10.40", "-windowed", expect_rc=2)
-        self.assertIn("unrecognized arguments", text)
+    def test_flag_shaped_arguments_are_kept(self):
+        args = neo.make_parser().parse_args(["launch", "--dry-run", "10.40", "-windowed", "-log"])
+        self.assertEqual(args.extra, ["-windowed", "-log"])
+        self.assertTrue(args.dry_run)
+        self.assertEqual(args.version, "10.40")
+
+    def test_double_dash_separator_is_accepted_and_stripped(self):
+        args = neo.make_parser().parse_args(["launch", "10.40", "--", "-windowed"])
+        self.assertEqual(args.extra, ["-windowed"])  # argparse drops the separator
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStatusWatch(CliTestCase):
+    """--watch polls fortniteAccess and exits with a notification once granted."""
+
+    def run_status_watch(self, access_value):
+        import io
+        from unittest import mock
+
+        auth = neo.Auth()
+        auth.d = {"account_id": "ACCOUNT", "refresh_token": "R", "access_token": "A",
+                  "display_name": "n", "access_expires_at": None}
+
+        def fake_jhttp(method, url, body=None, headers=None, timeout=60):
+            if url.endswith("/token"):
+                return {"access_token": "T"}
+            if "lightswitch" in url:
+                return {"status": "UP", "banned": False, "allowedActions": []}
+            if "ban-status" in url:
+                return {"banned": False}
+            if url.endswith("/fortniteAccess"):
+                return access_value
+            if "entitlements" in url:
+                return {"ownedOfferIds": ["5"]}
+            if "onlinecount" in url:
+                return {"count": 3}
+            return {}
+
+        with mock.patch.object(neo, "jhttp", fake_jhttp), \
+                mock.patch.object(neo, "notify") as notified, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            neo.cmd_status(
+                __import__("argparse").Namespace(watch=True, interval=10), auth)
+        return out.getvalue(), notified
+
+    def test_watch_exits_and_notifies_once_access_is_granted(self):
+        output, notified = self.run_status_watch(True)
+        self.assertIn("granted", output)
+        notified.assert_called_once()
+        self.assertIn("neo launch", notified.call_args[0][1])
+
+    def test_watch_reports_deny_without_notifying(self):
+        # watching while denied is endless by design — stop the clock at the
+        # first sleep and check what had been printed by then
+        class ClockStopped(Exception):
+            pass
+
+        def stop_the_clock(_seconds):
+            raise ClockStopped
+
+        import io
+        from unittest import mock
+
+        auth = neo.Auth()
+        auth.d = {"account_id": "ACCOUNT", "refresh_token": "R", "access_token": "A",
+                  "display_name": "n", "access_expires_at": None}
+
+        def fake_jhttp(method, url, body=None, headers=None, timeout=60):
+            if url.endswith("/token"):
+                return {"access_token": "T"}
+            if "lightswitch" in url:
+                return {"status": "UP", "banned": False}
+            if "ban-status" in url:
+                return {"banned": False}
+            if url.endswith("/fortniteAccess"):
+                return False
+            if "entitlements" in url:
+                return {}
+            if "onlinecount" in url:
+                return {}
+            return {}
+
+        import argparse
+
+        with mock.patch.object(neo, "jhttp", fake_jhttp), \
+                mock.patch.object(neo, "notify") as notified, \
+                mock.patch.object(neo.time, "sleep", stop_the_clock), \
+                contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(ClockStopped):
+            neo.cmd_status(argparse.Namespace(watch=True, interval=10), auth)
+        self.assertIn("fortniteAccess: False", out.getvalue())
+        notified.assert_not_called()
+
+
+class TestUninstall(CliTestCase):
+    def make_install(self):
+        root = self.home / "game"
+        inst = root / "++Fortnite+Release-10.40-CL-9380822"
+        (inst / "FortniteGame").mkdir(parents=True)
+        (inst / ".neo-manifest.json").write_text("{}")
+        (inst / "FortniteGame" / "x.bin").write_bytes(b"payload")
+        state = {"installs": {"++Fortnite+Release-10.40-CL-9380822": {"path": str(inst)}}}
+        (self.home / "share").mkdir(exist_ok=True)
+        (self.home / "share" / "state.json").write_text(json.dumps(state))
+        return inst
+
+    def test_uninstall_with_yes_removes_files_and_state(self):
+        import argparse
+        import io
+
+        inst = self.make_install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            neo.cmd_uninstall(argparse.Namespace(version=None, yes=True))
+        self.assertFalse(inst.exists())
+        self.assertEqual(json.loads((self.home / "share" / "state.json").read_text()),
+                         {"installs": {}})
+
+    def test_uninstall_refuses_dirs_without_our_manifest(self):
+        import argparse
+        import io
+
+        inst = self.make_install()
+        (inst / ".neo-manifest.json").unlink()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            neo.cmd_uninstall(argparse.Namespace(version=None, yes=True))
+        self.assertTrue(inst.exists())  # nothing deleted
+        # the stale state entry was dropped anyway
+        self.assertEqual(json.loads((self.home / "share" / "state.json").read_text()),
+                         {"installs": {}})
+
+
+class TestCacheCommand(CliTestCase):
+    def test_stats_then_clear(self):
+        import argparse
+        import io
+
+        chunks = pathlib.Path(neo.cache_dir()) / "chunks"
+        chunks.mkdir(parents=True, exist_ok=True)
+        (chunks / "abc").write_bytes(b"0" * 2048)
+        (chunks / "def").write_bytes(b"0" * 1024)
+        manifests = pathlib.Path(neo.cache_dir()) / "manifests"
+        manifests.mkdir(parents=True, exist_ok=True)
+        (manifests / "10.40.json").write_text("{}")
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            neo.cmd_cache(argparse.Namespace(action="stats", all=False))
+        self.assertIn("2 file(s)", out.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            neo.cmd_cache(argparse.Namespace(action="clear", all=False))
+        self.assertFalse((chunks / "abc").exists())
+        self.assertTrue((manifests / "10.40.json").exists())  # kept unless --all
+
+
+class TestNewsFormatter(unittest.TestCase):
+    def test_list_payload_and_dict_wrapping_list(self):
+        direct = neo.format_news(
+            [{"title": "Season X", "message": "Soon.", "date": "2026-08-30"}])
+        self.assertEqual(direct, [("2026-08-30", "Season X", "Soon.")])
+        wrapped = neo.format_news({"news": [{"title": "Hi", "body": "Body"}],
+                                   "hash": "x"})
+        self.assertEqual(wrapped, [("", "Hi", "Body")])
+
+    def test_items_without_any_text_are_dropped(self):
+        self.assertEqual(neo.format_news([{"id": 1}, "junk", {}]), [])
+
+
+class TestLogCommand(CliTestCase):
+    def test_find_and_print_with_highlight(self):
+        import argparse
+        import io
+
+        prefix = self.home / "prefix"
+        log_dir = prefix / "drive_c" / "users" / "steamuser" / "AppData" / \
+            "Local" / "FortniteGame" / "Saved" / "Logs"
+        log_dir.mkdir(parents=True)
+        log = log_dir / "FortniteGame.log"
+        log.write_text(" mundane line\nCheckEntitledToPlay → 403\n")
+
+        with support.environment(WINEPREFIX=str(prefix)):
+            self.assertEqual(neo.find_game_log(), str(log))
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                neo.cmd_log(argparse.Namespace(follow=False, path=None))
+        text = out.getvalue()
+        self.assertIn("403", text)
+        self.assertIn("\033[33m", text)   # the entitlement line is highlighted
+        self.assertNotIn("\033[33m" + " mundane", text)
+
+

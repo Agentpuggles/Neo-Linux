@@ -24,6 +24,7 @@ side by side.
 | 9 | [In-game login flow](#9-in-game-login-flow-observed) | What happens after the exchange code |
 | 10 | [Known ambiguities](#10-known-ambiguities) | Where the format leaves room for misreads |
 | 11 | [Launcher self-update and access gating](#11-launcher-self-update-and-access-gating) | Velopack feed & schedule, playability gates, store entitlements |
+| 12 | [Friends over XMPP: scoping notes](#12-friends-over-xmpp-scoping-notes) | What a `neo friends` would take, read from the client |
 
 ## Gotchas at a glance
 
@@ -481,3 +482,43 @@ commands over it. Notable: `launch_neo_build`, `import_neo_build`,
 `getAccountTier`, `checkLauncherUpdate`, `applyLauncherUpdate`. The host pushes
 `neo-*` DOM events back (`neo-launcher-update-changed`,
 `neo-game-state-changed`, `neo-service-builds-updated`, …).
+
+## 12. Friends over XMPP: scoping notes
+
+Scoped from the decompiled client, **not yet implemented in `neo`** — this section
+is what a `neo friends` command would have to speak. Recorded now because the
+findings are easy to lose and annoying to re-derive.
+
+The official client does not use a library for this: `NeoLauncher.dll` contains a
+hand-rolled XMPP client (`NeoLauncher.Services.Friends.NeoXmppClient`, 35 methods)
+speaking raw XML stanzas over a websocket.
+
+### 12.1 What the client does
+
+| Piece | Observed in the binary |
+| --- | --- |
+| Transport | websocket to `wss://xmpp-service-prod.neofn.dev` (`NeoPresenceService.EnsureConnectedAsync`) |
+| Session flow | `ConnectAsync` → `OpenStreamAsync` → `AuthenticateAsync` ("XMPP SASL authentication") → `BindAsync` → `EstablishSessionAsync` → `RequestRosterAsync` |
+| Bind resource | `neo_launcher_bind_{n}` (interlocked counter), presence resource `"launcher"` |
+| Auth material | `GetFriendsAccessTokenAsync` — a dedicated token, distinct from the account access token; presumably the SASL credential |
+| Events | `RawStanzaReceived` / `PresenceReceived` / `MessageReceived` / `Disconnected`; `LastInboundXml`/`LastOutboundXml` kept for debugging |
+| Presence model | `NeoPresenceView`: accountId, status, activity, gameStatus, resource, resourceType, priority; lifecycle published as the game starts/stops |
+| HTTP side | friends service `https://friends-public-service-prod.neofn.dev/friends` for roster/search/actions (add/remove, nicknames), so not everything needs XMPP |
+
+### 12.2 What `neo friends` would take
+
+1. A websocket client on the standard library only: RFC 6455 handshake (`http.client`+
+   `socket`+ `ssl` + `base64` for the key, then a frame codec — client frames are
+   never masked server-side, so the codec is small). ~150 lines, testable against
+   a local socket pair.
+2. The SASL mechanism string and stream XML — **composed at runtime, not visible as
+   literals**; one live capture (or a deeper IL read of `AuthenticateAsync`) settles
+   it. Until then any implementation is a guess; this is the main open unknown.
+3. Roster + presence state tracking, which the HTTP endpoints may make unnecessary
+   for a read-only `neo friends` listing (roster over HTTP, presence over XMPP).
+4. A decision on backgrounding: presence publishing implies staying connected for
+   the session; a listing command can connect, snapshot, and disconnect.
+
+Risk notes: the server may reject non-official bind resources or token types; and
+presence storms from polling reconnects would be antisocial — a snapshot client
+avoids both.
