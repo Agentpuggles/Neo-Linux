@@ -56,6 +56,28 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.3.0] — 2026-08-30
+
+Diagnostics for the access gates. `neo status` now shows store entitlements,
+and the protocol doc gains a section on how the official launcher updates
+itself and decides who may play — read out of the decompiled NeoLauncher 1.0.7
+binary and its bundled web app, not guessed.
+
+### Added
+
+- `neo status`: "Entitlements" line — `GET store.neofn.dev/api/v1/entitlements/{id}`
+  summarised as offer ids, paid/refunded orders and subscriptions, so an
+  early-access purchase can be watched registering on the account. Best-effort:
+  failures warn and never abort the rest of the status output.
+- `docs/protocol.md` §11 "Launcher self-update and access gating": the Velopack
+  feed (`/api/public/releases`, client-credentials bearer) and the 30-minute
+  check-apply-restart cycle; the three playability gates (the per-account
+  `fortniteAccess` flag, the `["10.40"]` build allowlist baked into both the
+  DLL and the web bundle, and the in-game `PLAY` entitlement); the store
+  entitlements endpoint; a map of the WebView2 bridge. Established negative:
+  no launch-date or countdown logic exists anywhere in the client. Store and
+  analytics services added to the §1 table.
+
 ## [0.2.0] — 2026-08-29
 
 First public/repository release. Everything below validated live against production

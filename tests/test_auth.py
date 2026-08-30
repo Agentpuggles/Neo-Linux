@@ -197,3 +197,38 @@ class TestExchangeCodes(AuthTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStoreEntitlements(AuthTestCase):
+    """The store endpoint and its summary line — docs/protocol.md §11.3."""
+
+    def test_url_and_bearer_are_the_documented_shape(self):
+        self.stub_json_http({"ownedOfferIds": ["5"]})
+        auth = neo.Auth()
+        auth.d = dict(TOKEN)
+        result = neo.store_entitlements(auth)
+        self.assertEqual(result["ownedOfferIds"], ["5"])
+        self.assertEqual(self.calls[0]["method"], "GET")
+        self.assertEqual(
+            self.calls[0]["url"],
+            "https://store.neofn.dev/api/v1/entitlements/ACCOUNT",
+        )
+        self.assertEqual(self.calls[0]["headers"]["Authorization"], "Bearer ACCESS")
+
+    def test_summary_lists_offers_and_paid_orders(self):
+        payload = {
+            "ownedOfferIds": ["5", "7"],
+            "orders": [
+                {"offerId": "5", "paid": True, "refunded": False},
+                {"offerId": "9", "paid": True, "refunded": True},
+            ],
+            "subscriptions": [{"offerId": "5"}],
+        }
+        self.assertEqual(
+            neo.describe_entitlements(payload),
+            "offers 5, 7; 1/2 orders paid; 1 subscription(s)",
+        )
+
+    def test_summary_of_an_empty_account_and_of_garbage(self):
+        self.assertEqual(neo.describe_entitlements({}), "none on file")
+        self.assertEqual(neo.describe_entitlements(["x"]), "['x']")
