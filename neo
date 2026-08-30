@@ -51,7 +51,7 @@ import urllib.request
 import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -1209,6 +1209,22 @@ class XmppSession:
                               f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
             if want in frame: return frame
 
+    def _recv_iq(self, iq_id, timeout=15):
+        """Wait for the iq reply carrying our id. Servers answer empty-bodied
+        iqs self-closing (<iq type="result" id="x"/>), so matching a literal
+        </iq> never fires — correlate by id, XMPP-style. Quote styles vary."""
+        needles = (f'id="{iq_id}"', f"id='{iq_id}'")
+        deadline = time.time() + timeout
+        while True:
+            frame = self._read(timeout=max(deadline - time.time(), 0.001))
+            if frame is None:
+                raise WsError(f"timed out waiting for iq {iq_id!r}; last exchange:\n"
+                              f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
+            if any(n in frame for n in needles):
+                if 'type="error"' in frame or "type='error'" in frame:
+                    raise WsError(f"iq {iq_id} error: {frame[:300]}")
+                return frame
+
     def _recv_any(self, timeout):
         deadline = time.time() + timeout
         while True:
@@ -1243,15 +1259,15 @@ class XmppSession:
         self._send('<iq type="set" id="bind_1"><bind '
                    'xmlns="urn:ietf:params:xml:ns:xmpp-bind">'
                    "<resource>neo_launcher_bind_1</resource></bind></iq>")
-        m = re.search(r"<jid>([^<]+)</jid>", self._recv("</iq>"))
+        m = re.search(r"<jid>([^<]+)</jid>", self._recv_iq("bind_1"))
         if m: self.jid = m.group(1)
         self._send('<iq type="set" id="sess_1"><session '
                    'xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>')
-        self._recv("</iq>")
+        self._recv_iq("sess_1")
 
     def roster(self):
         self._send('<iq type="get" id="ros_1"><query xmlns="jabber:iq:roster"/></iq>')
-        return self._recv("</iq>")
+        return self._recv_iq("ros_1")
 
     def presence_snapshot(self, wait=3.0):
         """Go available, gather presence for `wait` seconds, go unavailable."""

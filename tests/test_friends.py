@@ -118,7 +118,7 @@ SCRIPTED = [
     ("<auth", '<success xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>'),
     ("xmpp-bind", '<iq type="result" id="bind_1"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind">'
                   "<jid>ACCT@h/neo_launcher_bind_1</jid></bind></iq>"),
-    ("xmpp-session", '<iq type="result" id="sess_1"></iq>'),
+    ("xmpp-session", '<iq type="result" id="sess_1"/>'),  # self-closing, like prod
     ("jabber:iq:roster", '<iq type="result" id="ros_1"><query xmlns="jabber:iq:roster">'
                          '<item jid="friend1@h" subscription="both"/>'
                          '<item jid="friend2@h" subscription="both"/></query></iq>'),
