@@ -814,6 +814,45 @@ def game_argv(basedir_win, code1, code2, fltoken, extra=()):
 def fl_token():
     return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(24))
 
+# When a game process dies on one of Wine's *own* built-in APIs ("wine: … to
+# unimplemented function <module>.<fn>, aborting"), it is the signature of a
+# prefix/Proton mismatch, not a bug in this launch vector: the prefix was created
+# by one Wine/Proton and is being run by another (a self-updating "Latest"
+# Proton is the usual culprit), so built-in DLLs load from mixed generations and
+# even decades-old functions resolve as missing. docs/engineering-notes.md #14.
+WINE_ABORT_RE = re.compile(r"to unimplemented function \S+\.\S+, aborting")
+WINE_ABORT_HINT = (
+    "Wine aborted on 'unimplemented function' — a Wine DLL mismatch, not a neo bug.\n"
+    "The game prefix was created by a different Proton than the one now launching it\n"
+    "(a self-updating 'Latest' Proton is the usual cause). To fix:\n"
+    "  1. pin one Proton and launch with it every time:\n"
+    "        neo launch --proton <name-or-path-of-that-Proton>\n"
+    "  2. recreate the game prefix with that same Proton (umu rebuilds it on the next\n"
+    "     launch) — never reuse a prefix made by another Proton.\n"
+    "  3. if it still aborts, drop in a fresh copy of the Proton itself and retry."
+)
+
+
+def wine_abort_hint(stderr):
+    """Guidance when a launch died on Wine's 'unimplemented function' abort (a
+    prefix/Proton mismatch), else None."""
+    if WINE_ABORT_RE.search(stderr or ""):
+        return WINE_ABORT_HINT
+    return None
+
+
+def _run_launch(cmd, cwd):
+    """Run umu/proton with the game, streaming stderr live; return (rc, stderr)."""
+    chunks = []
+    proc = subprocess.Popen(cmd, cwd=cwd, stderr=subprocess.PIPE)
+    with proc.stderr:
+        for chunk in proc.stderr:
+            text = chunk.decode("utf-8", "replace")
+            chunks.append(text)
+            sys.stderr.write(text)
+            sys.stderr.flush()
+    return proc.wait(), "".join(chunks)
+
 def cmd_launch(args, auth):
     st = load_state()
     _version, inst = select_install(args.version, st)
@@ -881,8 +920,13 @@ def cmd_launch(args, auth):
         shown = a if not a.startswith(("-AUTH_PASSWORD=", "-p=")) else a.split("=")[0] + "=***"
         print("   ", shown)
     if args.dry_run: return
-    rc = subprocess.call(cmd, cwd=win64)
+    rc, stderr_text = _run_launch(cmd, win64)
     print(f"\ngame exited: {rc}")
+    if rc != 0:
+        hint = wine_abort_hint(stderr_text)
+        if hint:
+            print()
+            warn(hint)
 
 # ---------------------------------------------------------------- login
 CHALLENGE = (ACCOUNT + "/api/oauth/challenge/Discord?"   # NB: case-sensitive route!

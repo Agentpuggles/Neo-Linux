@@ -276,6 +276,7 @@ checklist in [CONTRIBUTING.md](CONTRIBUTING.md#testing).
 | CDN returns 403 | R2 rejects some default user agents; `neo` sends its own. If you're behind a proxy or VPN, try without it. |
 | Chunk downloads fail with 404 | The CDN edge transiently 404s objects that exist; `neo` retries with backoff. A hard failure names the chunk GUID. |
 | Game shows an email / password screen | The login itself usually succeeded — check `neo status` for play access. Log: `<prefix>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/FortniteGame.log`. |
+| Game aborts instantly: `wine: … to unimplemented function …, aborting` | Your prefix was made by a different Proton than the one now launching it (a self-updating "Latest" Proton is the usual cause). Pin one Proton and recreate the prefix with it — [engineering notes §14](docs/engineering-notes.md#14-wine-unimplemented-function-abort--prefixproton-mismatch-not-a-neo-bug). `neo launch` now prints these steps itself when it sees this. |
 | `Failed to open descriptor file` | A `-basedir` quoting problem. `neo` already passes it bare; don't add quotes yourself. |
 | Extra UE4 command-line arguments | The `extra` positional exists but argparse rejects flag-shaped arguments after the subcommand, so extras don't reach the game yet. `--dry-run` and `--proton` work. |
 | Install filled the disk mid-download | Point the cache somewhere big: `neo config cache_dir /mnt/data/neo-cache`, or `NEO_CACHE=/mnt/data/neo-cache neo install`. Resume the same command. |

@@ -11,8 +11,8 @@ All notable changes to `neo` are documented here, newest first. The format follo
 
 ## [Unreleased]
 
-Repository hygiene and a test suite; nothing here changes how the launcher talks to
-the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
+Repository hygiene and a test suite, plus a self-diagnosing launch failure. Validated
+with `make check` (ruff + the offline suite + CLI smoke).
 
 ### Added
 
@@ -42,6 +42,11 @@ the services. Validated with `make check` (ruff + 90 offline tests + CLI smoke).
 - `neo`: `datetime`/`re` imported once at module level instead of inline, and every
   config/session/manifest read goes through a context manager so file handles are not
   left open across a 411-file install.
+- `neo launch` now watches the game's stderr for Wine's
+  `to unimplemented function <module>.<fn>, aborting` signature and, when it kills a
+  launch, prints the fix instead of a bare `game exited: 1` (pin one Proton, recreate
+  the prefix with it, refresh the Proton if it persists — docs/engineering-notes §14).
+  The launch command line is unchanged; on a normal boot nothing is different.
 - `docs/protocol.md` §5.1: corrected the `"00000000063"` row — 11 digits is *not* a
   multiple of 3, so `parse_num` reads it as a plain int rather than a 3-byte blob.
   Verified against the implementation and pinned by `tests/test_protocol.py`.

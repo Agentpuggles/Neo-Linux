@@ -422,3 +422,30 @@ class TestLaunchArgVector(CliTestCase):
         self.assertEqual(len(token), 24)
         self.assertTrue(set(token) <= set(string.ascii_lowercase + string.digits))
         self.assertNotEqual(token, neo.fl_token())
+
+
+class TestWineAbortHint(unittest.TestCase):
+    """A launch that dies on Wine's 'unimplemented function' abort should get a
+    pointer at the prefix/Proton mismatch, not a bare exit code. The signature is
+    drawn from a real `neo launch` transcript (engineering notes #14)."""
+
+    REAL_LINE = (
+        "wine: Call from 00006FFFFE50E164 to unimplemented function "
+        "win32u.NtGdiDdDDIQueryFSEBlock, aborting"
+    )
+
+    def test_recognises_a_real_wine_abort(self):
+        self.assertIsNotNone(neo.wine_abort_hint(self.REAL_LINE + "\n"))
+
+    def test_recognises_any_module_function_pair(self):
+        self.assertIsNotNone(
+            neo.wine_abort_hint("wine: Call from 0x7b to unimplemented function "
+                                "user32.dll.CreateDialogParamW, aborting")
+        )
+
+    def test_ignores_noise_and_empty_input(self):
+        benign = ("ntsync: up and running.\nProton: executable is a unix path.\n"
+                  "fixme:seh:some benign stub\n")
+        self.assertIsNone(neo.wine_abort_hint(benign))
+        self.assertIsNone(neo.wine_abort_hint(""))
+        self.assertIsNone(neo.wine_abort_hint(None))
