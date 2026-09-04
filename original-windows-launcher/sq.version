@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd">
+<metadata>
+<id>NeoLauncher</id>
+<title>Neo</title>
+<description>Neo</description>
+<authors>Neo</authors>
+<version>1.0.7</version>
+<channel>win</channel>
+<mainExe>NeoLauncher.exe</mainExe>
+<os>win</os>
+<rid>win</rid>
+<runtimeDependencies>webview2</runtimeDependencies>
+<shortcutLocations>Desktop,StartMenuRoot</shortcutLocations>
+<shortcutAmuid>velopack.NeoLauncher</shortcutAmuid>
+</metadata>
+</package>
