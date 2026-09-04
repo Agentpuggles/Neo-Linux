@@ -124,7 +124,9 @@ neo <command> [options]
   system    cache · log · config               (see Configuration)
 ```
 
-Run `neo <command> --help` for a command's own options.
+`neo help` (or `neo --help`) prints this same directory, grouped under `account` /
+`game` / `system`. Run `neo <command> --help` for a command's own options —
+`neo help <command>` and `neo <command> help` do the same thing.
 
 ### Account
 

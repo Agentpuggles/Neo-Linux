@@ -71,6 +71,63 @@ class TestInvocation(CliTestCase):
             with self.subTest(command=command):
                 self.assertIn("usage:", support.run_cli(command, "--help"))
 
+    def test_help_command_matches_the_help_flag(self):
+        self.assertEqual(support.run_cli("help"), support.run_cli("--help"))
+
+    def test_help_topic_shows_one_commands_help(self):
+        for command in ("login", "install", "launch", "config", "cache"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    support.run_cli("help", command),
+                    support.run_cli(command, "--help"),
+                )
+
+    def test_command_help_subcommand_equals_help_flag(self):
+        # `neo <cmd> help` must not be read as a positional value — e.g.
+        # `neo install help` used to try to install a build literally called "help".
+        for command in ("login", "setup", "status", "config", "install", "import",
+                        "verify", "uninstall", "cache", "launch", "friends", "log"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    support.run_cli(command, "help"),
+                    support.run_cli(command, "--help"),
+                )
+
+    def test_help_rejects_unknown_topics(self):
+        support.run_cli("help", "frobnicate", expect_rc=2)
+
+    def test_top_level_help_groups_every_command(self):
+        text = support.run_cli("--help")
+        for command in (
+            "login", "whoami", "setup", "logout", "status", "news", "friends",
+            "list", "install", "import", "verify", "uninstall", "launch",
+            "cache", "log", "config",
+        ):
+            self.assertIn(command, text)
+        for group in ("account", "game", "system"):
+            self.assertIn(group, text)
+
+    def test_top_level_usage_is_compact(self):
+        # the stock `{login,whoami,…}` choice list wraps on any real terminal
+        text = support.run_cli("--help")
+        self.assertIn("usage: neo <command> [options]", text)
+        self.assertNotIn("{login,", text)
+
+    def test_install_help_documents_its_positionals(self):
+        text = support.run_cli("install", "--help")
+        self.assertIn("VER", text)
+        self.assertIn("build to install", text)
+
+    def test_import_help_documents_path_and_version(self):
+        text = support.run_cli("import", "--help")
+        self.assertIn("PATH", text)
+        self.assertIn("VER", text)
+        self.assertIn("catalog version", text)
+
+    def test_help_command_documents_its_topic(self):
+        text = support.run_cli("help", "--help")
+        self.assertIn("[command]", text)
+
     def test_install_documents_its_flags(self):
         text = support.run_cli("install", "--help")
         for flag in ("-d", "-j", "--keep-cache"):

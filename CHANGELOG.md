@@ -26,6 +26,10 @@ with `make check` (ruff + the offline suite + CLI smoke).
   the same three things locally.
 - `install_path()` — a manifest-supplied file name can no longer write outside the
   install directory (`../` and absolute paths are rejected at assembly time).
+- `neo help` — `help` is now a real command, not an argparse "invalid choice": `neo help`
+  prints the full help (same as `neo --help`), `neo help <cmd>` prints one command's
+  help, and `neo <cmd> help` is accepted alongside `neo <cmd> -h` / `--help` for every
+  command (previously `neo install help` treated "help" as a build version to install).
 - `CONTRIBUTING.md` (design constraints, how to add a command, what to test, release
   checklist), `SECURITY.md` (private reporting, scope, what the public OAuth client
   credentials are and are not), `CODE_OF_CONDUCT.md`, issue forms for bugs and feature
@@ -36,6 +40,14 @@ with `make check` (ruff + the offline suite + CLI smoke).
 
 ### Changed
 
+- **Help got a real directory.** `neo help` / `--help` now prints the command list
+  grouped under `account` / `game` / `system` with a one-line summary per command
+  (a compact `usage: neo <command> [options]` replaces the stock argparse usage line,
+  whose `{login,whoami,…}` choice list wrapped on every terminal). Every subcommand
+  got its own summary plus helps and metavars on its positionals, so
+  `neo install --help` reads `[VER]  build to install …` instead of a bare
+  `[version]`. One `_COMMANDS` table drives it all, so `neo help`, `neo <cmd> --help`
+  and README → Usage cannot drift apart.
 - `neo`: `to_winpath()` and `changelist_number()` are module-level functions instead of
   nested closures — they carry real bug-fix logic (see below) and are now unit-tested.
   Behaviour is unchanged.
