@@ -422,3 +422,64 @@ class TestLaunchArgVector(CliTestCase):
         self.assertEqual(len(token), 24)
         self.assertTrue(set(token) <= set(string.ascii_lowercase + string.digits))
         self.assertNotEqual(token, neo.fl_token())
+
+
+class TestWineAbortHint(unittest.TestCase):
+    """A launch that dies on Wine's 'unimplemented function' abort should get a
+    pointer at the prefix/Proton mismatch, not a bare exit code. The signature is
+    drawn from a real `neo launch` transcript (engineering notes #14)."""
+
+    REAL_LINE = (
+        "wine: Call from 00006FFFFE50E164 to unimplemented function "
+        "win32u.NtGdiDdDDIQueryFSEBlock, aborting"
+    )
+
+    def test_recognises_a_real_wine_abort(self):
+        self.assertIsNotNone(neo.wine_abort_hint(self.REAL_LINE + "\n"))
+
+    def test_recognises_any_module_function_pair(self):
+        self.assertIsNotNone(
+            neo.wine_abort_hint("wine: Call from 0x7b to unimplemented function "
+                                "user32.dll.CreateDialogParamW, aborting")
+        )
+
+    def test_ignores_noise_and_empty_input(self):
+        benign = ("ntsync: up and running.\nProton: executable is a unix path.\n"
+                  "fixme:seh:some benign stub\n")
+        self.assertIsNone(neo.wine_abort_hint(benign))
+        self.assertIsNone(neo.wine_abort_hint(""))
+        self.assertIsNone(neo.wine_abort_hint(None))
+
+    def test_hint_points_at_switching_proton_not_recreating_the_prefix(self):
+        hint = neo.wine_abort_hint(self.REAL_LINE + "\n")
+        self.assertIn("GE-Proton", hint)
+        self.assertIn("neo config proton", hint)
+
+
+class TestProtonResolution(CliTestCase):
+    """umu chooses the Proton from the PROTONPATH env var, so `neo launch` must
+    set that (from the --proton flag or the persistent `proton` config setting)
+    instead of passing umu a CLI flag it does not understand."""
+
+    def write_config(self, text):
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        self.config_file.write_text(text)
+
+    def test_unset_defaults_to_none(self):
+        self.write_config("{}")
+        args = neo.make_parser().parse_args(["launch"])
+        self.assertIsNone(neo.resolve_proton(args))
+
+    def test_config_proton_is_used_by_default(self):
+        self.write_config('{"proton": "GE-Proton"}')
+        args = neo.make_parser().parse_args(["launch"])
+        self.assertEqual(neo.resolve_proton(args), "GE-Proton")
+
+    def test_cli_flag_overrides_config(self):
+        self.write_config('{"proton": "GE-Proton"}')
+        args = neo.make_parser().parse_args(["launch", "--proton", "GE-Proton-9-27"])
+        self.assertEqual(neo.resolve_proton(args), "GE-Proton-9-27")
+
+    def test_config_command_persists_proton(self):
+        support.run_cli("config", "proton", "GE-Proton")
+        self.assertEqual(self.read_config()["proton"], "GE-Proton")

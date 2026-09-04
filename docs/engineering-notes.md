@@ -20,7 +20,7 @@ Wire formats referenced below: [protocol.md](protocol.md).
 
 ## Contents
 
-Fifteen notes, each one a failure that cost real time, the diagnosis that ended it, and the line of `neo` or of the docs it turned into. Reading order does not matter; § links below jump to the note.
+Each note below is a failure that cost real time, the diagnosis that ended it, and the line of `neo` or of the docs it turned into. Reading order does not matter; § links below jump to the note.
 
 | § | Note | What it taught us |
 | --- | --- | --- |
@@ -37,6 +37,7 @@ Fifteen notes, each one a failure that cost real time, the diagnosis that ended 
 | 11 | [11. "Failed to open descriptor file" — quoting through the Wine boundary](#11-failed-to-open-descriptor-file--quoting-through-the-wine-boundary) | quotes are re-escaped crossing the Wine boundary — pass the path bare |
 | 12 | [12. The email/password screen that wasn't a login failure](#12-the-emailpassword-screen-that-wasnt-a-login-failure) | an in-game login screen meant a missing entitlement, not a bad token |
 | 13 | [13. Corrections and follow-ups](#13-corrections-and-follow-ups) | the ledger of what we got wrong, kept in the open |
+| 14 | [14. Wine "unimplemented function" abort — the Proton build, not the prefix](#14-wine-unimplemented-function-abort--the-proton-build-not-the-prefix) | a Wine API you expect to exist aborting means that Proton build is broken — switch Proton, not prefix |
 | — | [Validated results (for the record)](#validated-results-for-the-record) | the measured numbers, on the hardware this was built against |
 | — | [Appendix: environment quirks that shaped the work](#appendix-environment-quirks-that-shaped-the-work) | the small, real gotchas that cost hours |
 
@@ -341,6 +342,62 @@ next to the code they describe.
   from a fuzzy-matched edit on a 700-line script. These notes were added as whole new
   files rather than inserted into existing ones, and both were checked for duplicate
   headings, unbalanced fences and dangling links afterward.
+
+## 14. Wine "unimplemented function" abort — the Proton build, not the prefix
+
+**Symptom.** `neo launch` under umu/Proton: protonfixes and ntsync come up, then Wine
+kills the process with `wine: Call from <addr> to unimplemented function <module>.<fn>,
+aborting`, and the game exits 1 within seconds. The functions named are often absurd —
+in the report that started this, `shell32.dll.SHGetFolderPathW` and
+`win32u.NtGdiDdDDIQueryFSEBlock`, APIs Wine has shipped for years. No game window ever
+appears, and the abort address is identical across runs.
+
+**First diagnosis (wrong, and how we knew).** We treated it as a prefix/Proton mismatch
+— the prefix built by one Proton, run by a self-updating `Proton … Latest`, so built-in
+DLLs load from mixed generations. The fix we gave was "pin a Proton and recreate the
+prefix." **It did not fix it**: rebuilding the prefix from scratch with the same Proton
+reproduced the abort byte-for-byte (same call address). That disproved the prefix theory
+— a stale-prefix failure dies after a fresh prefix; this one did not care about the
+prefix at all.
+
+**Diagnosis (what it actually is).** An "unimplemented function" abort on an API that
+*is* implemented is the downstream symptom of Wine's own modules failing to initialise
+out of a given Wine/Proton build — the `win32u`/`gdi32`/`user32`/`shell32` set inside
+that Proton is inconsistent or broken at startup, before the game's own code runs. It is
+deterministic *per Proton build*: switch to a different, known-good Proton lineage and it
+boots cleanly with the same command line and the same prefix. The launcher's own
+end-to-end validation (§8) had booted this exact command line on umu 1.4.3 /
+Proton-CachyOS / ntsync; a later build of that same floating "Latest" Proton regressed —
+the self-updating label is exactly why it is not a stable reference point.
+
+**Resolution.** Use a different Proton, and make it the persistent default so launches
+are reproducible:
+
+```sh
+neo config proton GE-Proton     # umu fetches & keeps the latest GE-Proton updated
+neo launch
+# or, one-off:
+PROTONPATH=GE-Proton neo launch
+# or pin an exact build so it stops moving under you:
+neo config proton GE-Proton-9-27
+```
+
+umu selects the Proton from the **`PROTONPATH` environment variable**, not a CLI flag —
+`neo launch --proton <p>` sets that for the child process, and the config `proton`
+setting is applied when `--proton` is absent. (An earlier revision of the launcher
+appended `--proton <p>` to the umu-run command line, which umu does not define and would
+have misread as the game executable — fixed.)
+
+`neo launch` now spots this signature on stderr (`to unimplemented function <m>.<f>,
+aborting`) and prints the switch-Proton steps above instead of a bare `game exited: 1`.
+
+**Lesson.** Two, one methodological. First: *verify a diagnosis before documenting it as
+certain* — we shipped a plausible "recreate the prefix" fix that a single fresh-prefix
+run falsified, and the correction is recorded here rather than papered over. Second: a
+*built-in, shipped-for-years* Wine function reporting unimplemented means that Wine
+build is internally broken at startup — change the Wine/Proton, don't chase the prefix.
+And when a "Latest"/auto-updating component is part of the environment, it is not a
+stable reference; a reproducible setup pins a version.
 
 ---
 

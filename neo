@@ -814,6 +814,54 @@ def game_argv(basedir_win, code1, code2, fltoken, extra=()):
 def fl_token():
     return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(24))
 
+# When a game process dies on one of Wine's *own* built-in APIs ("wine: … to
+# unimplemented function <module>.<fn>, aborting"), naming functions Wine has
+# shipped for years, the Wine/Proton build itself is crashing before the game
+# runs — not a bug in this launch vector and not the prefix (a prefix rebuilt
+# from scratch reproduces it verbatim). The fix is to run a different Proton:
+# GE-Proton is the stable, widely-tested choice. docs/engineering-notes.md #14.
+WINE_ABORT_RE = re.compile(r"to unimplemented function \S+\.\S+, aborting")
+WINE_ABORT_HINT = (
+    "Wine aborted on 'unimplemented function' — that Proton build is crashing at\n"
+    "startup (before the game runs). Not a neo bug; a fresh prefix reproduces it, so\n"
+    "the fix is a different Proton, not a new prefix. Set GE-Proton as the default and\n"
+    "relaunch:\n"
+    "    neo config proton GE-Proton      # persistent default\n"
+    "    neo launch\n"
+    "or just for one launch:\n"
+    "    PROTONPATH=GE-Proton neo launch"
+)
+
+
+def wine_abort_hint(stderr):
+    """Guidance when a launch died on Wine's 'unimplemented function' abort
+    (that Proton build crashing at startup), else None."""
+    if WINE_ABORT_RE.search(stderr or ""):
+        return WINE_ABORT_HINT
+    return None
+
+
+def resolve_proton(args):
+    """umu picks the Proton from the PROTONPATH *environment variable*, not a CLI
+    flag. Resolution order: the --proton flag > the persistent `proton` config
+    setting > whatever PROTONPATH the caller already exported > umu's own default."""
+    if getattr(args, "proton", None):
+        return args.proton
+    return load_config().get("proton")
+
+
+def _run_launch(cmd, cwd, env=None):
+    """Run umu/proton with the game, streaming stderr live; return (rc, stderr)."""
+    chunks = []
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stderr=subprocess.PIPE)
+    with proc.stderr:
+        for chunk in proc.stderr:
+            text = chunk.decode("utf-8", "replace")
+            chunks.append(text)
+            sys.stderr.write(text)
+            sys.stderr.flush()
+    return proc.wait(), "".join(chunks)
+
 def cmd_launch(args, auth):
     st = load_state()
     _version, inst = select_install(args.version, st)
@@ -874,15 +922,26 @@ def cmd_launch(args, auth):
     argv = game_argv(basedir_win, code1, code2, fltoken, extra)
 
     umu = os.environ.get("NEO_UMU", "umu-run")
-    cmd = [umu] + (["--proton", args.proton] if getattr(args, "proton", None) else []) \
-        + [exe] + argv
+    proton = resolve_proton(args)
+    env = None
+    if proton:
+        env = dict(os.environ)
+        env["PROTONPATH"] = proton
+    cmd = [umu, exe, *argv]
     print("Launching:", exe)
+    if proton:
+        print("   PROTONPATH=" + proton)
     for a in argv:
         shown = a if not a.startswith(("-AUTH_PASSWORD=", "-p=")) else a.split("=")[0] + "=***"
         print("   ", shown)
     if args.dry_run: return
-    rc = subprocess.call(cmd, cwd=win64)
+    rc, stderr_text = _run_launch(cmd, win64, env=env)
     print(f"\ngame exited: {rc}")
+    if rc != 0:
+        hint = wine_abort_hint(stderr_text)
+        if hint:
+            print()
+            warn(hint)
 
 # ---------------------------------------------------------------- login
 CHALLENGE = (ACCOUNT + "/api/oauth/challenge/Discord?"   # NB: case-sensitive route!
@@ -1439,7 +1498,9 @@ def make_parser():
     s.add_argument("--all", action="store_true", help="clear also cached manifests")
     s = sub.add_parser("launch"); s.add_argument("version", nargs="?")
     s.add_argument("--dry-run", action="store_true")
-    s.add_argument("--proton")
+    s.add_argument("--proton", metavar="PROTON",
+                   help="Proton for this launch (overrides the config `proton` setting); "
+                        "umu receives it as PROTONPATH — a name like GE-Proton or a path")
     s.add_argument("extra", nargs=argparse.REMAINDER, metavar="args",
                    help="extra UE4 arguments (-windowed, -log, …); put options before these")
     s = sub.add_parser("friends")

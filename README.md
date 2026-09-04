@@ -147,7 +147,7 @@ Run `neo <command> --help` for a command's own options.
 | `neo import <path> <version>` | Registers a build folder that already exists on disk (must contain `FortniteGame/` and `Engine/`) — no 62 GB re-download. Fetches the manifest so `verify` works, and marks the install as imported. |
 | `neo verify [version]` | Re-hashes every installed file against the stored manifest. `--repair` re-fetches only the chunks the broken files need and rebuilds just those files — a full reinstall is never needed for a few bad files. |
 | `neo uninstall [version]` | Removes an install: deletes the build folder (only if it still carries neo's `.neo-manifest.json`) and drops the state entry. Prompts unless `--yes`. |
-| `neo launch [version]` | Checks the gates (lightswitch, bans), refreshes prism assets, mints two exchange codes and runs the game through umu-run. Options: `--dry-run` (print the command line and stop), `--proton PROTON`. Extra UE4 arguments go last: `neo launch 10.40 -windowed` (options like `--dry-run` must come before them). |
+| `neo launch [version]` | Checks the gates (lightswitch, bans), refreshes prism assets, mints two exchange codes and runs the game through umu-run. Options: `--dry-run` (print the command line and stop), `--proton PROTON` (overrides the config `proton` for this launch; umu receives it as `PROTONPATH`). The Proton defaults to the config `proton` setting, else your exported `PROTONPATH`, else umu's default. Extra UE4 arguments go last: `neo launch 10.40 -windowed` (options like `--dry-run` must come before them). |
 
 `version` defaults to the newest installed build (highest `CL-` number) for `verify`,
 `uninstall` and `launch`.
@@ -167,7 +167,7 @@ Run `neo <command> --help` for a command's own options.
 | --- | --- |
 | `neo config` | Print every setting and the config file path. |
 | `neo config <key>` | Print one setting. |
-| `neo config <key> <value>` | Set a setting. Keys: `install_root`, `cache_dir`, `workers`. |
+| `neo config <key> <value>` | Set a setting. Keys: `install_root`, `cache_dir`, `workers`, `proton`. |
 
 ### Files
 
@@ -186,6 +186,7 @@ Run `neo <command> --help` for a command's own options.
 | `install_root` | `~/Games/Neo` | `neo install -d DIR` |
 | `cache_dir` | `~/.local/share/neo/cache` | `NEO_CACHE` |
 | `workers` | `16` | `neo install -j N` |
+| `proton` | *(umu's default)* | `PROTONPATH`, `neo launch --proton` |
 
 ### Environment
 
@@ -195,6 +196,7 @@ Run `neo <command> --help` for a command's own options.
 | `NEO_CACHE` | Override the cache directory |
 | `NEO_UMU` | umu-run command to invoke (default `umu-run`) |
 | `WINEPREFIX` | Game prefix, honoured by umu-run — **set it**, otherwise umu uses `~/.wine` |
+| `PROTONPATH` | Proton umu should use (a name like `GE-Proton` or a path); read by umu. `neo` honours it, and `neo config proton <p>` / `neo launch --proton <p>` set it for the child |
 
 ### Disk usage
 
@@ -276,6 +278,7 @@ checklist in [CONTRIBUTING.md](CONTRIBUTING.md#testing).
 | CDN returns 403 | R2 rejects some default user agents; `neo` sends its own. If you're behind a proxy or VPN, try without it. |
 | Chunk downloads fail with 404 | The CDN edge transiently 404s objects that exist; `neo` retries with backoff. A hard failure names the chunk GUID. |
 | Game shows an email / password screen | The login itself usually succeeded — check `neo status` for play access. Log: `<prefix>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/FortniteGame.log`. |
+| Game aborts instantly: `wine: … to unimplemented function …, aborting` | That Proton build is crashing before the game runs — a fresh prefix reproduces it, so it's not the prefix. Switch Proton and make it the default: `neo config proton GE-Proton`, then `neo launch` — [engineering notes §14](docs/engineering-notes.md#14-wine-unimplemented-function-abort--the-proton-build-not-the-prefix). `neo launch` prints these steps itself when it sees this. |
 | `Failed to open descriptor file` | A `-basedir` quoting problem. `neo` already passes it bare; don't add quotes yourself. |
 | Extra UE4 command-line arguments | The `extra` positional exists but argparse rejects flag-shaped arguments after the subcommand, so extras don't reach the game yet. `--dry-run` and `--proton` work. |
 | Install filled the disk mid-download | Point the cache somewhere big: `neo config cache_dir /mnt/data/neo-cache`, or `NEO_CACHE=/mnt/data/neo-cache neo install`. Resume the same command. |
