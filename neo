@@ -6,6 +6,7 @@
 # Written with AI assistance under human direction (README → Acknowledgements).
 #
 # Commands:
+#   neo help [cmd]            this help; `neo help <cmd>` / `neo <cmd> help` = one command's help
 #   neo login                 Discord login (browser; neolauncher:// handler)
 #   neo whoami / logout       account info / drop session
 #   neo setup [name]          first-run display name
@@ -1466,54 +1467,178 @@ def cmd_setup(args, auth):
     ok(f"display name set: {confirmed}")
 
 # ---------------------------------------------------------------- main
+# One table drives both `neo help` and every subcommand's summary, so the two
+# can't drift apart (or from README → Usage). Group names come from the README.
+_COMMAND_GROUPS = ("account", "game", "system")
+_COMMANDS = {
+    "login":     ("account", "Discord login (browser; neolauncher:// handler)"),
+    "whoami":    ("account", "display name, account id and email"),
+    "setup":     ("account", "first-run display name"),
+    "logout":    ("account", "drop the stored session"),
+    "status":    ("account", "service status, bans, access and entitlements"),
+    "news":      ("account", "launcher news from the content service"),
+    "friends":   ("account", "friends roster + live presence (XMPP)"),
+    "list":      ("game", "every build in the catalog"),
+    "install":   ("game", "download and assemble a build"),
+    "import":    ("game", "register an existing build folder (no download)"),
+    "verify":    ("game", "re-hash installed files against the manifest"),
+    "uninstall": ("game", "remove an install"),
+    "launch":    ("game", "run the game through umu-run/Proton"),
+    "cache":     ("system", "chunk-cache size and cleanup"),
+    "log":       ("system", "show/tail the game's FortniteGame.log"),
+    "config":    ("system", "read/write settings"),
+    "help":      ("", "show this help — `neo help [command]`"),
+}
+
+
+class _NeoHelpFormatter(argparse.HelpFormatter):
+    """Compact, grouped help instead of argparse's sprawl."""
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        if prefix is None:
+            prefix = "usage: "
+        # The stock usage line lists the whole {login,…} choice set, which wraps
+        # on any real terminal; the command directory below is the real thing.
+        cmd = next((a for a in actions if not a.option_strings and a.dest == "cmd"), None)
+        if cmd is None:  # subcommand parsers keep the normal usage line
+            return super()._format_usage(usage, actions, groups, prefix)
+        return f"{prefix}{self._prog} <command> [options]\n\n"
+
+    def _format_action(self, action):
+        if isinstance(action, argparse._SubParsersAction):
+            return self._format_commands(action)
+        return super()._format_action(action)
+
+    def _format_commands(self, action):
+        subs = {s.dest: s for s in action._get_subactions()}
+        parts = []
+        for group in _COMMAND_GROUPS:
+            members = [name for name in _COMMANDS if _COMMANDS[name][0] == group]
+            if parts:
+                parts.append("\n")
+            parts.append(f"{' ' * self._current_indent}{group}\n")
+            for name in members:
+                parts.append(super()._format_action(subs[name]))
+        # the meta `help` command sits alone at the bottom, outside the groups
+        parts.append("\n")
+        parts.append(super()._format_action(subs["help"]))
+        return "".join(parts)
+
+
+class _NeoArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser whose subparsers inherit the tidy formatter."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", _NeoHelpFormatter)
+        super().__init__(*args, **kwargs)
+
+
 def make_parser():
-    p = argparse.ArgumentParser(prog="neo", description="NeoFN Linux launcher")
+    p = _NeoArgumentParser(
+        prog="neo", description=f"NeoFN Linux launcher — v{VERSION}",
+        epilog="Run `neo <command> --help` (or `neo help <command>`) for a command's own options.")
     p.add_argument("--version", action="version", version=VERSION)
-    sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("login"); s.add_argument("--code"); s.add_argument("--callback")
-    s = sub.add_parser("whoami")
-    s = sub.add_parser("setup"); s.add_argument("name", nargs="?")
-    sub.add_parser("logout")
-    s = sub.add_parser("status")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="command",
+                           title="commands", prog="neo")
+
+    def add(name, **kw):
+        _group, summary = _COMMANDS[name]
+        return sub.add_parser(name, help=summary, **kw)
+
+    s = add("login")
+    s.add_argument("--code", metavar="CODE", help="exchange the code directly (manual fallback)")
+    s.add_argument("--callback", metavar="URL", help="process a neolauncher://callback URL")
+    add("whoami")
+    s = add("setup"); s.add_argument("name", nargs="?", metavar="NAME",
+                                     help="display name to set (omit to see status)")
+    add("logout")
+    s = add("status")
     s.add_argument("--watch", action="store_true",
                    help="keep polling until fortniteAccess is granted, then notify and exit")
-    s.add_argument("--interval", type=int, default=60, help="poll period in seconds (min 10)")
-    s = sub.add_parser("news"); s.add_argument("--json", action="store_true",
-                                               help="dump the raw payload")
-    sub.add_parser("list")
-    s = sub.add_parser("config"); s.add_argument("key", nargs="?"); s.add_argument("value", nargs="?")
-    s = sub.add_parser("install"); s.add_argument("version", nargs="?")
-    s.add_argument("-d", "--dir"); s.add_argument("-j", "--jobs", type=int)
+    s.add_argument("--interval", type=int, default=60, metavar="SECS",
+                   help="poll period in seconds (min 10)")
+    s = add("news"); s.add_argument("--json", action="store_true",
+                                    help="dump the raw payload")
+    add("list")
+    s = add("config")
+    s.add_argument("key", nargs="?", metavar="KEY", help="setting to read or write")
+    s.add_argument("value", nargs="?", metavar="VALUE", help="value to store (omit to read)")
+    s = add("install")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to install — a substring like 10.40, or `live` (default)")
+    s.add_argument("-d", "--dir", metavar="DIR",
+                   help="install into DIR (default: the config install_root)")
+    s.add_argument("-j", "--jobs", type=int, metavar="N",
+                   help="download workers (default: the config workers)")
     s.add_argument("--keep-cache", action="store_true",
                    help="keep downloaded chunks after install (enables offline repair, uses ~build-size disk)")
     s.add_argument("--force", action="store_true", help="skip the free-space preflight")
-    s = sub.add_parser("import"); s.add_argument("path"); s.add_argument("version",
-                   help="catalog version of the build, e.g. 10.40")
-    s = sub.add_parser("verify"); s.add_argument("version", nargs="?")
+    s = add("import")
+    s.add_argument("path", metavar="PATH",
+                   help="existing build root (contains FortniteGame/ and Engine/)")
+    s.add_argument("version", metavar="VER", help="catalog version of the build, e.g. 10.40")
+    s = add("verify")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to verify (default: newest installed)")
     s.add_argument("--repair", action="store_true",
                    help="re-fetch and rebuild only missing/corrupt files")
-    s = sub.add_parser("uninstall"); s.add_argument("version", nargs="?")
+    s = add("uninstall")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to remove (default: newest installed)")
     s.add_argument("--yes", action="store_true", help="skip the removal prompt")
-    s = sub.add_parser("cache"); s.add_argument("action", nargs="?", choices=["stats", "clear"])
+    s = add("cache")
+    s.add_argument("action", nargs="?", choices=["stats", "clear"], metavar="{stats,clear}",
+                   help="what to do (default: stats)")
     s.add_argument("--all", action="store_true", help="clear also cached manifests")
-    s = sub.add_parser("launch"); s.add_argument("version", nargs="?")
-    s.add_argument("--dry-run", action="store_true")
+    s = add("launch")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to run (default: newest installed)")
+    s.add_argument("--dry-run", action="store_true", help="print the command line and stop")
     s.add_argument("--proton", metavar="PROTON",
                    help="Proton for this launch (overrides the config `proton` setting); "
                         "umu receives it as PROTONPATH — a name like GE-Proton or a path")
     s.add_argument("extra", nargs=argparse.REMAINDER, metavar="args",
                    help="extra UE4 arguments (-windowed, -log, …); put options before these")
-    s = sub.add_parser("friends")
-    s.add_argument("--wait", type=float, default=3.0,
+    s = add("friends")
+    s.add_argument("--wait", type=float, default=3.0, metavar="SECS",
                    help="seconds to collect presence (default 3)")
     s.add_argument("-v", "--verbose", action="store_true", help="print the raw XMPP exchange")
-    s = sub.add_parser("log")
+    s = add("log")
     s.add_argument("-f", "--follow", action="store_true", help="tail like tail -f")
-    s.add_argument("-p", "--path", help="explicit path to FortniteGame.log")
+    s.add_argument("-p", "--path", metavar="PATH", help="explicit path to FortniteGame.log")
+    # `neo help` (same as `neo -h`), `neo help <cmd>` (same as `neo <cmd> -h`).
+    # `neo <cmd> help` is handled in main(), before parse_args, since "help"
+    # would otherwise be read as a positional value (e.g. `install`'s version).
+    h = add("help")
+    h.add_argument("topic", nargs="?", choices=list(sub.choices), metavar="command",
+                   help="command to show help for (default: the full help)")
+    # The commands group is created last; move it ahead of options so the
+    # directory reads before the two generic flags (the empty "positional
+    # arguments" group stays first and renders nothing).
+    p._action_groups.remove(p._subparsers)
+    p._action_groups.insert(1, p._subparsers)
+    p._subparsers_action = sub  # main() uses this for `neo <cmd> help`
     return p
 
 def main():
-    args = make_parser().parse_args()
+    p = make_parser()
+    sub = p._subparsers_action  # _SubParsersAction; name → parser in .choices
+    argv = sys.argv[1:]
+    # `neo <cmd> help` == `neo <cmd> --help`. Intercepted before parse_args
+    # because for commands with a positional (install, import, config, …),
+    # argparse would otherwise consume "help" as that positional's value and
+    # actually run the command.
+    if (len(argv) == 2 and argv[1] == "help"
+            and argv[0] in sub.choices and argv[0] != "help"):
+        sub.choices[argv[0]].print_help()
+        return
+    args = p.parse_args(argv)
+    if args.cmd == "help":
+        if args.topic:
+            sub.choices[args.topic].print_help()
+        else:
+            p.print_help()
+        return
 
     auth = Auth()
     if args.cmd == "login": return cmd_login(args)
