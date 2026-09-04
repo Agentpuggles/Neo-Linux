@@ -20,7 +20,7 @@ side by side.
 | 5 | [Epic JSON manifest](#5-epic-json-manifest) | BuildPatchServices manifest format, decimal "blob" numerics |
 | 6 | [Chunk storage](#6-chunk-storage) | Chunk URL scheme, 62-byte file format, CDN gotchas |
 | 7 | [Prism (patched client)](#7-prism-patched-client) | Asset list, sha256 verification, exe patching |
-| 8 | [Launch recipe](#8-launch-recipe) | Exact command line, Wine/umu-run notes |
+| 8 | [Launch recipe](#8-launch-recipe) | Exact command line, modifiers (`-NeoModifiers=`), Wine/umu-run notes |
 | 9 | [In-game login flow](#9-in-game-login-flow-observed) | What happens after the exchange code |
 | 10 | [Known ambiguities](#10-known-ambiguities) | Where the format leaves room for misreads |
 | 11 | [Launcher self-update and access gating](#11-launcher-self-update-and-access-gating) | Velopack feed & schedule, playability gates, store entitlements |
@@ -42,6 +42,7 @@ side by side.
 | 10 | An in-game login screen usually means **entitlement**, not authentication | [9](#9-in-game-login-flow-observed) |
 | 11 | The web UI checks `fortniteAccess` **once per start**; the refresh event is never re-dispatched — a grayed Launch button needs a launcher restart | [11.2](#112-playability-gates) |
 | 12 | The public-build allowlist (`["10.40"]`) is baked into **both** the DLL and the web bundle — a new public build ships as a launcher update | [11.2](#112-playability-gates) |
+| 13 | Gameplay toggles (Edit On Release, Instant Reset, Disable Pre-Edit) are **not** UE4 flags — they ride `-NeoModifiers=<json>` produced by `EncodeGameModifiers` | [8.2](#82-game-modifiers--neomodifiers) |
 
 ---
 
@@ -378,6 +379,40 @@ two fresh exchange codes minted.
   instead.
 - The game is DX11; umu-run plus any modern Proton works. Logs land at
   `<prefix>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/FortniteGame.log`.
+
+### 8.2 Game modifiers (`-NeoModifiers=`)
+
+The Windows launcher's **Options** panel (per-build, web bundle
+`neo_launcher_game_modifiers_v1`) is not a pile of extra UE4 flags. The web UI
+posts a JSON object with the launch, and `GameLauncher.EncodeGameModifiers`
+turns it into one extra argument:
+
+```
+-NeoModifiers={"editOnRelease":true,"instantReset":false,"disablePreEdit":false,"bubblePerformance":false}
+```
+
+| UI label | JSON key | What it does |
+| --- | --- | --- |
+| Edit On Release | `editOnRelease` | Confirms a building edit as soon as the edit button is released |
+| Instant Reset | `instantReset` | Confirms a reset as soon as the reset button is released (migrated from the older `scrollWheelReset` storage key) |
+| Disable Pre-Edit | `disablePreEdit` | Skips the highlighted pre-edit state so edits apply without a second confirm |
+| Bubble Builds & Performance | `bubblePerformance` | **Locked** in the 1.0.7 UI (*"Coming after release"*) — always `false` |
+
+`EncodeGameModifiers` (IL at `0x113af0`): read property `"modifiers"` off the
+bridge payload; if the value is not a JSON object, or its `GetRawText()` is
+empty / `"{}"`, return null (argument omitted). Otherwise prefix that raw text
+with `-NeoModifiers=`. The web UI always sends all four keys, so an all-false
+object is *not* `{}` and the official client still emits the argument.
+
+`neo` matches the compact camelCase payload character-for-character when any
+live toggle is on (`encode_game_modifiers`), and **omits** the all-false form
+so the default argv stays the twelve-flag vector above. Persistent via
+`neo config edit_on_release on` (etc.); one-shot via `neo launch --edit-on-release`.
+
+The same Options panel has a free-text **Launch Options** field
+(`neo_launcher_launch_options_v1`, per-build in the Windows client). That is
+ordinary extra argv, which `neo` already forwards as `neo launch … -- -windowed`
+and now also persists as `neo config launch_options "-windowed -log"`.
 
 ## 9. In-game login flow (observed)
 

@@ -13,13 +13,15 @@
 #   neo status [--watch]      service status + access/entitlements (--watch: wait)
 #   neo news                  launcher news from the content service
 #   neo list                  available builds
-#   neo config [k] [v]        settings: install_root, cache_dir, workers
+#   neo config [k] [v]        settings: install_root, cache_dir, workers, proton,
+#                             edit_on_release, instant_reset, disable_pre_edit, launch_options
 #   neo install [ver]         install a build (default: live)   -d DIR -j N
 #   neo import <path> <ver>   register a build folder (no download)
 #   neo verify [ver] --repair fix missing/corrupt files only
 #   neo uninstall [ver]       remove an install (state + files)
 #   neo cache [stats|clear]   chunk-cache size / cleanup
 #   neo launch [ver] [-- args...]  run the game via umu-run
+#                          --edit-on-release / --instant-reset / --disable-pre-edit
 #   neo friends               roster + presence over XMPP (--verbose: stanzas)
 #   neo log [-f]              show/tail the game's FortniteGame.log
 #
@@ -37,6 +39,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import ssl
@@ -93,14 +96,40 @@ def config_path():
     cfg_root = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
     return os.path.join(cfg_root, "neo", "config.json")
 
+# Official Options → Modifiers keys (web bundle `hS` / `neo_launcher_game_modifiers_v1`).
+# bubblePerformance is locked in the Windows UI ("Coming after release") — we keep it
+# false in the payload so the JSON shape matches, but never expose a switch for it.
+MODIFIER_CONFIG_KEYS = (
+    ("edit_on_release", "editOnRelease"),
+    ("instant_reset", "instantReset"),
+    ("disable_pre_edit", "disablePreEdit"),
+)
+BOOL_CONFIG_KEYS = {cfg_key for cfg_key, _json_key in MODIFIER_CONFIG_KEYS}
+INT_CONFIG_KEYS = {"workers"}
+
 def load_config():
-    cfg = {"install_root": os.path.expanduser("~/Games/Neo"), "workers": 16}
+    cfg = {
+        "install_root": os.path.expanduser("~/Games/Neo"), "workers": 16,
+        "edit_on_release": False, "instant_reset": False, "disable_pre_edit": False,
+        "launch_options": "",
+    }
     try:
         with open(config_path()) as f:
             cfg.update(json.load(f))
     except Exception:
         pass
     return cfg
+
+def parse_bool_flag(value, key="value"):
+    v = str(value).strip().lower()
+    if v in ("1", "true", "yes", "on"): return True
+    if v in ("0", "false", "no", "off"): return False
+    raise RuntimeError(f"{key} wants true/false (got {value!r})")
+
+def parse_config_value(key, value):
+    if key in INT_CONFIG_KEYS: return int(value)
+    if key in BOOL_CONFIG_KEYS: return parse_bool_flag(value, key)
+    return value
 
 def load_state():
     try:
@@ -807,10 +836,56 @@ OFFICIAL_ARGS = ("-epicapp=Fortnite", "-epicenv=Prod", "-epicportal",
                  "-skippatchcheck", "-nobe", "-fromfl=eac",
                  "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode")
 
-def game_argv(basedir_win, code1, code2, fltoken, extra=()):
-    return ["-basedir=" + basedir_win, *OFFICIAL_ARGS,
-            "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken,
-            *extra]
+def encode_game_modifiers(mods):
+    """Mirror GameLauncher.EncodeGameModifiers (NeoLauncher.dll).
+
+    The web UI always posts `{editOnRelease, instantReset, disablePreEdit,
+    bubblePerformance}` as JSON; the host concatenates `-NeoModifiers=` with
+    that object's GetRawText(), and skips the arg only when the object is
+    missing or literally `{}`. All-false is *not* `{}`, so the Windows client
+    still sends the payload — we omit the no-op form so the default argv stays
+    the live-validated 12-flag vector (protocol.md §8.2).
+    """
+    payload = {
+        "editOnRelease": bool((mods or {}).get("editOnRelease")),
+        "instantReset": bool((mods or {}).get("instantReset")),
+        "disablePreEdit": bool((mods or {}).get("disablePreEdit")),
+        "bubblePerformance": False,
+    }
+    if not any(payload[k] for k in ("editOnRelease", "instantReset", "disablePreEdit")):
+        return None
+    return "-NeoModifiers=" + json.dumps(payload, separators=(",", ":"))
+
+def resolve_modifiers(args, cfg=None):
+    """Config values, then per-launch `--edit-on-release` / `--no-…` overrides."""
+    cfg = cfg if cfg is not None else load_config()
+    mods = {}
+    for cfg_key, json_key in MODIFIER_CONFIG_KEYS:
+        mods[json_key] = bool(cfg.get(cfg_key))
+        override = getattr(args, cfg_key, None)
+        if override is not None:
+            mods[json_key] = bool(override)
+    return mods
+
+def resolve_launch_options(args, cfg=None):
+    """Persistent `launch_options` (the Windows Options → Launch text field), then
+    any extra UE4 args on this invocation. CLI extras win by coming last."""
+    cfg = cfg if cfg is not None else load_config()
+    stored = str(cfg.get("launch_options") or "").strip()
+    extra = list(args.extra or [])
+    if extra and extra[0] == "--":
+        extra = extra[1:]
+    bits = shlex.split(stored, posix=True) if stored else []
+    return bits + extra
+
+def game_argv(basedir_win, code1, code2, fltoken, extra=(), modifiers=None):
+    argv = ["-basedir=" + basedir_win, *OFFICIAL_ARGS,
+            "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken]
+    encoded = encode_game_modifiers(modifiers)
+    if encoded:
+        argv.append(encoded)
+    argv.extend(extra)
+    return argv
 
 def fl_token():
     return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(24))
@@ -917,10 +992,9 @@ def cmd_launch(args, auth):
     fltoken = fl_token()
 
     basedir_win = to_winpath(win64)
-    extra = list(args.extra or [])
-    if extra and extra[0] == "--":
-        extra = extra[1:]  # allow the `neo launch 10.40 -- -windowed` spelling too
-    argv = game_argv(basedir_win, code1, code2, fltoken, extra)
+    extra = resolve_launch_options(args)
+    argv = game_argv(basedir_win, code1, code2, fltoken, extra,
+                     modifiers=resolve_modifiers(args))
 
     umu = os.environ.get("NEO_UMU", "umu-run")
     proton = resolve_proton(args)
@@ -1433,7 +1507,10 @@ def cmd_whoami(args, auth):
 def cmd_config(args):
     cfg = load_config()
     if args.key and args.value is not None:
-        val = int(args.value) if args.key == "workers" else args.value
+        try:
+            val = parse_config_value(args.key, args.value)
+        except (RuntimeError, ValueError) as e:
+            err(str(e)); sys.exit(1)
         cfg[args.key] = val
         os.makedirs(os.path.dirname(config_path()), exist_ok=True)
         with open(config_path(), "w") as f: json.dump(cfg, f, indent=1)
@@ -1561,7 +1638,9 @@ def make_parser():
                                     help="dump the raw payload")
     add("list")
     s = add("config")
-    s.add_argument("key", nargs="?", metavar="KEY", help="setting to read or write")
+    s.add_argument("key", nargs="?", metavar="KEY",
+                   help="setting to read or write (install_root, cache_dir, workers, proton, "
+                        "edit_on_release, instant_reset, disable_pre_edit, launch_options)")
     s.add_argument("value", nargs="?", metavar="VALUE", help="value to store (omit to read)")
     s = add("install")
     s.add_argument("version", nargs="?", metavar="VER",
@@ -1597,6 +1676,15 @@ def make_parser():
     s.add_argument("--proton", metavar="PROTON",
                    help="Proton for this launch (overrides the config `proton` setting); "
                         "umu receives it as PROTONPATH — a name like GE-Proton or a path")
+    s.add_argument("--edit-on-release", action=argparse.BooleanOptionalAction, default=None,
+                   help="confirm building edits when the edit button is released "
+                        "(official Options → Modifiers; persisted via neo config edit_on_release)")
+    s.add_argument("--instant-reset", action=argparse.BooleanOptionalAction, default=None,
+                   help="confirm a reset when the reset button is released "
+                        "(persisted via neo config instant_reset)")
+    s.add_argument("--disable-pre-edit", action=argparse.BooleanOptionalAction, default=None,
+                   help="skip the pre-edit highlight so edits apply without a confirm step "
+                        "(persisted via neo config disable_pre_edit)")
     s.add_argument("extra", nargs=argparse.REMAINDER, metavar="args",
                    help="extra UE4 arguments (-windowed, -log, …); put options before these")
     s = add("friends")

@@ -16,6 +16,17 @@ with `make check` (ruff + the offline suite + CLI smoke).
 
 ### Added
 
+- **Game modifiers from the official Options panel.** Discord users were right:
+  NeoLauncher 1.0.7's per-build Options → Modifiers sheet (Edit On Release, Instant
+  Reset, Disable Pre-Edit) was never a UE4 flag — `EncodeGameModifiers` in
+  `NeoLauncher.dll` emits `-NeoModifiers={"editOnRelease":true,…}` and the patched
+  client reads that. `neo launch --edit-on-release` (also `--instant-reset`,
+  `--disable-pre-edit`, and `--no-…` to override) and `neo config edit_on_release on`
+  now send the same compact JSON. Bubble Builds & Performance stays locked, matching
+  the 1.0.7 UI. The all-false form is omitted so the default argv stays the
+  live-validated 12-flag vector. The Options → Launch text field is `neo config
+  launch_options "-windowed -log"`. Documented in protocol.md §8.2.
+
 - Offline unit test suite (`tests/`, stdlib `unittest`, no network, no writes to a
   real `~/.local/share/neo`): manifest numerics, chunk header and CDN round-trip,
   install assembly, auth request shapes, CLI exit codes — plus `tests/test_docs.py`,

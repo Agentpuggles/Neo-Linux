@@ -38,6 +38,7 @@ Each note below is a failure that cost real time, the diagnosis that ended it, a
 | 12 | [12. The email/password screen that wasn't a login failure](#12-the-emailpassword-screen-that-wasnt-a-login-failure) | an in-game login screen meant a missing entitlement, not a bad token |
 | 13 | [13. Corrections and follow-ups](#13-corrections-and-follow-ups) | the ledger of what we got wrong, kept in the open |
 | 14 | [14. Wine "unimplemented function" abort — the Proton build, not the prefix](#14-wine-unimplemented-function-abort--the-proton-build-not-the-prefix) | a Wine API you expect to exist aborting means that Proton build is broken — switch Proton, not prefix |
+| 15 | [15. "Edit On Release" was never a UE4 flag](#15-edit-on-release-was-never-a-ue4-flag) | the 12-flag LaunchAsync vector is not the whole launch — Options live in a different method |
 | — | [Validated results (for the record)](#validated-results-for-the-record) | the measured numbers, on the hardware this was built against |
 | — | [Appendix: environment quirks that shaped the work](#appendix-environment-quirks-that-shaped-the-work) | the small, real gotchas that cost hours |
 
@@ -398,6 +399,33 @@ run falsified, and the correction is recorded here rather than papered over. Sec
 build is internally broken at startup — change the Wine/Proton, don't chase the prefix.
 And when a "Latest"/auto-updating component is part of the environment, it is not a
 stable reference; a reproducible setup pins a version.
+
+## 15. "Edit On Release" was never a UE4 flag
+
+**Symptom.** Discord users reported the official Windows launcher had Options the
+Linux CLI did not — Edit On Release, Instant Reset, Disable Pre-Edit — and assumed
+`neo` had simply forgotten extra UE4 arguments.
+
+**Diagnosis.** The 0.5.4 golden vector was transcribed from `GameLauncher.LaunchAsync`
+(IL `0x12AE79–0x12AF5C`): twelve hardcoded `-epicapp` / `-AUTH_*` / `-fltoken` strings.
+That method never mentions the Options panel. The web bundle's Options sheet
+(`index-CsjcwFzI.js`) stores `{editOnRelease, instantReset, disablePreEdit,
+bubblePerformance}` in `neo_launcher_game_modifiers_v1` and posts it on
+`launch_neo_build` as `modifiers`. A different method,
+`GameLauncher.EncodeGameModifiers` (IL `0x113af0`), reads that JSON object and, unless
+it is missing or literally `{}`, concatenates `-NeoModifiers=` with its raw text.
+Bubble Builds & Performance is in the payload but locked in the UI (*"Coming after
+release"*). The same panel's Launch Options field is ordinary extra argv
+(`neo_launcher_launch_options_v1`).
+
+**Resolution.** `encode_game_modifiers` emits the compact camelCase JSON; `neo
+launch --edit-on-release` / `neo config edit_on_release on` (and the two sibling
+toggles) turn it on. All-false is omitted so the default argv stays the live-validated
+twelve-flag vector. Documented in [protocol.md §8.2](protocol.md#82-game-modifiers--neomodifiers).
+
+**Lesson.** A method named `LaunchAsync` that contains twelve `ldstr` flags is a
+complete picture of *that* method, not of launch. The GUI's extra state rides a
+different helper; grep the web bundle for the label users actually see.
 
 ---
 
