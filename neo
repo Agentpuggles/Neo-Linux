@@ -1,0 +1,1758 @@
+#!/usr/bin/env python3
+# neo — a native Linux launcher for NeoFN (neofn.dev)
+#
+# Reconstructed from NeoLauncher 1.0.7 (WinUI3) + BuildPatchServices.
+# Python 3.9+ stdlib only. Game runs through umu-run/Proton.
+# Written with AI assistance under human direction (README → Acknowledgements).
+#
+# Commands:
+#   neo help [cmd]            this help; `neo help <cmd>` / `neo <cmd> help` = one command's help
+#   neo login                 Discord login (browser; neolauncher:// handler)
+#   neo whoami / logout       account info / drop session
+#   neo setup [name]          first-run display name
+#   neo status [--watch]      service status + access/entitlements (--watch: wait)
+#   neo news                  launcher news from the content service
+#   neo list                  available builds
+#   neo config [k] [v]        settings: install_root, cache_dir, workers, proton,
+#                             edit_on_release, instant_reset, disable_pre_edit, launch_options
+#   neo install [ver]         install a build (default: live)   -d DIR -j N
+#   neo import <path> <ver>   register a build folder (no download)
+#   neo verify [ver] --repair fix missing/corrupt files only
+#   neo uninstall [ver]       remove an install (state + files)
+#   neo cache [stats|clear]   chunk-cache size / cleanup
+#   neo launch [ver] [-- args...]  run the game via umu-run
+#                          --edit-on-release / --instant-reset / --disable-pre-edit
+#   neo friends               roster + presence over XMPP (--verbose: stanzas)
+#   neo log [-f]              show/tail the game's FortniteGame.log
+#
+# Env: NEO_HOME (data dir override), NEO_UMU (umu-run command, default "umu-run"),
+#      NEO_XMPP (XMPP websocket url, default wss://xmpp-service-prod.neofn.dev),
+#      WINEPREFIX (honored by umu-run).
+
+import argparse
+import base64
+import concurrent.futures as cf
+from datetime import datetime, timedelta, timezone
+import glob
+import hashlib
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import socket
+import ssl
+import string
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree
+import zlib
+
+VERSION = "0.5.5"
+UA = f"neo-linux/{VERSION}"
+
+# ---------------------------------------------------------------- constants
+ACCOUNT  = "https://account-public-service-prod.neofn.dev/account"
+LAUNCHER = "https://launcher-public-service-prod06.neofn.dev/launcher"
+LIGHTSW  = "https://lightswitch-public-service-prod.neofn.dev/lightswitch"
+PRISM    = "https://prism-public-service-prod.neofn.dev/prism"
+STORE    = "https://store.neofn.dev/api/v1"
+CONTENT  = "https://fortnitecontent-website-prod07.neofn.dev/content/api"
+FRIENDS  = "https://friends-public-service-prod.neofn.dev/friends"
+XMPP_WS  = "wss://xmpp-service-prod.neofn.dev"
+CLIENT_ID = "8a4eeb89e05743fc9dba6fccb6766d35"
+CLIENT_SECRET = "7fe1392842624667b996d55ab5ebef03"
+REDIRECT_URI = "neolauncher://callback/auth"
+GAME_EXE_NAME = "FortniteClient-Win64-Shipping.exe"
+# \bPLAY\b, bare: case-insensitive PLAY also matches every "Display:" line
+LOG_HIGHLIGHT = re.compile(r"login|logout|entitle|\bPLAY\b|banned|denied|forbidden|error|fatal", re.I)
+
+CHUNK_MAGIC = 0xB1FE3AA2
+CHUNK_HEADER_V2 = 62
+
+def data_dir():
+    root = os.environ.get("NEO_HOME") or os.path.join(
+        os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "neo")
+    for sub in ("", "prism"):
+        os.makedirs(os.path.join(root, sub), exist_ok=True)
+    return root
+
+def cache_dir():
+    """bulk cache (chunks + manifests) — can live on another filesystem."""
+    root = (os.environ.get("NEO_CACHE") or load_config().get("cache_dir")
+            or os.path.join(data_dir(), "cache"))
+    for sub in ("chunks", "manifests"):
+        os.makedirs(os.path.join(root, sub), exist_ok=True)
+    return root
+
+def config_path():
+    cfg_root = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(cfg_root, "neo", "config.json")
+
+# Official Options → Modifiers keys (web bundle `hS` / `neo_launcher_game_modifiers_v1`).
+# bubblePerformance is locked in the Windows UI ("Coming after release") — we keep it
+# false in the payload so the JSON shape matches, but never expose a switch for it.
+MODIFIER_CONFIG_KEYS = (
+    ("edit_on_release", "editOnRelease"),
+    ("instant_reset", "instantReset"),
+    ("disable_pre_edit", "disablePreEdit"),
+)
+BOOL_CONFIG_KEYS = {cfg_key for cfg_key, _json_key in MODIFIER_CONFIG_KEYS}
+INT_CONFIG_KEYS = {"workers"}
+
+def load_config():
+    cfg = {
+        "install_root": os.path.expanduser("~/Games/Neo"), "workers": 16,
+        "edit_on_release": False, "instant_reset": False, "disable_pre_edit": False,
+        "launch_options": "",
+    }
+    try:
+        with open(config_path()) as f:
+            cfg.update(json.load(f))
+    except Exception:
+        pass
+    return cfg
+
+def parse_bool_flag(value, key="value"):
+    v = str(value).strip().lower()
+    if v in ("1", "true", "yes", "on"): return True
+    if v in ("0", "false", "no", "off"): return False
+    raise RuntimeError(f"{key} wants true/false (got {value!r})")
+
+def parse_config_value(key, value):
+    if key in INT_CONFIG_KEYS: return int(value)
+    if key in BOOL_CONFIG_KEYS: return parse_bool_flag(value, key)
+    return value
+
+def load_state():
+    try:
+        with open(os.path.join(data_dir(), "state.json")) as f:
+            return json.load(f)
+    except Exception:
+        return {"installs": {}}
+
+def save_state(st):
+    p = os.path.join(data_dir(), "state.json")
+    with open(p + ".tmp", "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(p + ".tmp", p)
+
+# ---------------------------------------------------------------- console
+def C(code, s): return f"\033[{code}m{s}\033[0m"
+def ok(s):   print(C("32", "✔ ") + s)
+def warn(s): print(C("33", "⚠ ") + s)
+def err(s):  print(C("31", "✖ ") + s, file=sys.stderr)
+def human(n):
+    for u in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or u == "TiB": return f"{n:.1f} {u}" if u != "B" else f"{int(n)} B"
+        n /= 1024
+
+def notify(title, message):
+    """Desktop notification, best-effort (no notify-send, no DE → silent no-op)."""
+    try:
+        subprocess.run(["notify-send", "-a", "neo", title, message], timeout=5,
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+# ---------------------------------------------------------------- http
+def http(method, url, body=None, headers=None, timeout=60, retries=3):
+    hdrs = {"User-Agent": UA}
+    if headers: hdrs.update(headers)
+    data = None
+    if body is not None:
+        if isinstance(body, (bytes, bytearray)):
+            data = bytes(body)  # pre-encoded (e.g. JSON) — caller sets Content-Type
+        else:
+            data = urllib.parse.urlencode(body).encode()
+            hdrs.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"{method} {url} failed: {last}")
+
+def jhttp(method, url, body=None, headers=None, timeout=60):
+    status, raw = http(method, url, body, headers, timeout)
+    if status >= 400:
+        raise RuntimeError(f"{method} {url} -> HTTP {status}: {raw[:200].decode('utf-8','replace')}")
+    return json.loads(raw or b"{}")
+
+def basic_auth():
+    import base64
+    return {"Authorization": "Basic " + base64.b64encode(
+        f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()}
+
+# ---------------------------------------------------------------- auth
+class Auth:
+    def __init__(self):
+        self.path = os.path.join(data_dir(), "auth.json")
+        self.d = {}
+        if os.path.exists(self.path):
+            try:
+                with open(self.path) as f: self.d = json.load(f)
+            except Exception: pass
+
+    def save(self):
+        with open(self.path + ".tmp", "w") as f: json.dump(self.d, f, indent=1)
+        os.replace(self.path + ".tmp", self.path)
+        os.chmod(self.path, 0o600)
+
+    @property
+    def logged_in(self): return bool(self.d.get("refresh_token"))
+
+    def _token(self, body):
+        return jhttp("POST", ACCOUNT + "/api/oauth/token", body, basic_auth())
+
+    def client_credentials(self):
+        return self._token({"grant_type": "client_credentials"})
+
+    def login_code(self, code):
+        # NB: NeoFN's token endpoint wants the code in the "authorization_code"
+        # field (per decompiled OAuthTokenRequest), NOT OAuth-standard "code"
+        r = self._token({"grant_type": "authorization_code",
+                         "authorization_code": code})
+        self._store(r, kill_others=True)
+
+    def refresh(self):
+        r = self._token({"grant_type": "refresh_token",
+                         "refresh_token": self.d["refresh_token"]})
+        self._store(r, kill_others=False)
+
+    def _store(self, r, kill_others):
+        self.d = {
+            "account_id": r["account_id"], "display_name": r.get("display_name", ""),
+            "access_token": r["access_token"],
+            "access_expires_at": r.get("expires_at"),
+            "refresh_token": r["refresh_token"],
+            "refresh_expires_at": r.get("refresh_expires_at"),
+        }
+        self.save()
+        if kill_others:
+            try: http("DELETE", ACCOUNT + "/api/oauth/sessions/kill?killType=OTHERS_ACCOUNT_CLIENT",
+                      headers={"Authorization": "Bearer " + r["access_token"]})
+            except Exception: pass
+
+    def access(self):
+        if not self.logged_in: err("Not logged in. Run: neo login"); sys.exit(1)
+        exp = self.d.get("access_expires_at")
+        if exp:
+            try:
+                if datetime.fromisoformat(exp.replace("Z", "+00:00")) - \
+                   datetime.now(timezone.utc) < timedelta(minutes=5):
+                    self.refresh()
+            except Exception: pass
+        return self.d["access_token"]
+
+    def exchange_code(self):
+        r = jhttp("GET", ACCOUNT + "/api/oauth/exchange",
+                  headers={"Authorization": "Bearer " + self.access()})
+        return r["code"], r.get("expiresInSeconds") or r.get("expires_in_seconds")
+
+    def logout(self):
+        self.d = {}
+        self.save()
+
+# ---------------------------------------------------------------- api
+def get_builds(auth):
+    r = auth.client_credentials()
+    return jhttp("GET", LAUNCHER + "/api/public/builds",
+                 headers={"Authorization": "Bearer " + r["access_token"]})
+
+def get_distribution_points():
+    r = jhttp("GET", LAUNCHER + "/api/public/distributionpoints")
+    return [d.rstrip("/") for d in r.get("distributions", [])]
+
+def lightswitch(auth):
+    r = auth.client_credentials()
+    return jhttp("GET", LIGHTSW + "/api/service/fortnite/status",
+                 headers={"Authorization": "Bearer " + r["access_token"]})
+
+def prism_assets(auth):
+    return jhttp("GET", PRISM + "/api/assets",
+                 headers={"Authorization": "Bearer " + auth.access()})
+
+def prism_ban(auth):
+    return jhttp("GET", PRISM + "/api/v1/ban-status",
+                 headers={"Authorization": "Bearer " + auth.access()})
+
+def store_entitlements(auth):
+    # purchases (e.g. early access) register here — see docs/protocol.md §11.3
+    return jhttp("GET", STORE + "/entitlements/" + auth.d["account_id"],
+                 headers={"Authorization": "Bearer " + auth.access()})
+
+def describe_entitlements(ent):
+    """One-line summary of the store entitlements payload (§11.3).
+
+    Field names come from the official client's DTOs, which parse
+    case-insensitively; tolerate both spellings and anything unexpected.
+    """
+    if not isinstance(ent, dict):
+        return str(ent)[:120]
+    offers = ent.get("ownedOfferIds") or ent.get("owned_offer_ids") or []
+    orders = ent.get("orders") or []
+    subs = ent.get("subscriptions") or []
+    paid = [o for o in orders if isinstance(o, dict)
+            and o.get("paid") and not o.get("refunded")]
+    bits = []
+    if offers: bits.append("offers " + ", ".join(str(o) for o in offers))
+    if orders: bits.append(f"{len(paid)}/{len(orders)} orders paid")
+    if subs:   bits.append(f"{len(subs)} subscription(s)")
+    return "; ".join(bits) if bits else "none on file"
+
+def fortnite_access(auth):
+    return jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"]
+                 + "/fortniteAccess", headers={"Authorization": "Bearer " + auth.access()})
+
+def get_news():
+    # content service, no auth; the official client reads both shapes (§1)
+    for path in ("/launcher/news", "/pages/fortnite-game"):
+        try:
+            return jhttp("GET", CONTENT + path)
+        except Exception:
+            continue
+    raise RuntimeError("news unavailable from " + CONTENT)
+
+def first_of(d, *keys):
+    low = {str(k).lower(): v for k, v in d.items()}
+    for k in keys:
+        v = low.get(k.lower())
+        if v: return v
+    return None
+
+def format_news(payload):
+    """News payloads vary; surface anything list-like of dicts with a title-ish field."""
+    items = payload if isinstance(payload, list) else []
+    if isinstance(payload, dict):
+        for v in payload.values():
+            if isinstance(v, list) and v and all(isinstance(i, dict) for i in v):
+                items = v
+                break
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        title = first_of(it, "title", "headline", "name")
+        body = first_of(it, "message", "body", "description", "content")
+        date = first_of(it, "date", "publishedat", "timestamp")
+        if not (title or body):
+            continue
+        out.append((str(date or ""), str(title or "(untitled)"), str(body or "").strip()[:200]))
+    return out
+
+# ---------------------------------------------------------------- manifest
+def blob_to_bytes(s):
+    return bytes(int(s[i*3:(i+1)*3]) for i in range(len(s)//3))
+
+def parse_num(s):
+    """fixed-width padded decimal blob OR plain int, little-endian."""
+    if not isinstance(s, str): return int(s)
+    if len(s) % 3 == 0 and s.isdigit() and len(s) >= 3:
+        # ambiguous: 3-digit "031" is a plain group number, not blob of 1 byte(3=3*1 ok!)
+        return int.from_bytes(blob_to_bytes(s), "little") if len(s) > 3 else int(s)
+    try: return int(s)
+    except ValueError: return 0
+
+def parse_hash_hex(s):
+    if not isinstance(s, str): return ""
+    s = s.strip()
+    if len(s) == 60 and s.isdigit(): return blob_to_bytes(s).hex()
+    if s.lower().startswith("0x"): s = s[2:]
+    return s.lower()
+
+class Manifest:
+    def __init__(self, d):
+        self.d = d
+        fl = d.get("ManifestFileVersion", "")
+        flnum = int(fl[:3]) if isinstance(fl, str) and fl[:3].isdigit() else 0
+        self.chunk_subdir = "ChunksV3" if flnum < 15 else "ChunksV4"
+        self.chunks = {}   # guid -> {hash_u64, sha1, group, size}
+        for g, v in d.get("ChunkHashList", {}).items():
+            self.chunks.setdefault(g, {})["hash"] = int.from_bytes(blob_to_bytes(v), "little") \
+                if (isinstance(v, str) and len(v) == 24 and v.isdigit()) else int(v or 0)
+        for g, v in d.get("ChunkShaList", {}).items():
+            self.chunks.setdefault(g, {})["sha1"] = parse_hash_hex(v)
+        for g, v in d.get("DataGroupList", {}).items():
+            self.chunks.setdefault(g, {})["group"] = int(str(v).lstrip("0") or 0)
+        for g, v in d.get("ChunkFilesizeList", {}).items():
+            self.chunks.setdefault(g, {})["size"] = parse_num(v)
+        self.files = []
+        for f in d.get("FileManifestList", []):
+            parts = []
+            for p in f.get("FileChunkParts", []):
+                parts.append((p["Guid"], parse_num(p["Offset"]), parse_num(p["Size"])))
+            self.files.append({
+                "name": f["Filename"], "sha1": parse_hash_hex(f.get("FileHash", "")),
+                "parts": parts,
+                "exec": bool(f.get("bIsUnixExecutable")),
+                "symlink": f.get("SymlinkTarget") or None,
+            })
+
+    def version(self):
+        return self.d.get("BuildVersionString", "").replace("-Windows", "")
+
+    def chunk_relpath(self, guid):
+        c = self.chunks.get(guid, {})
+        if self.chunk_subdir == "ChunksV4":
+            return f"ChunksV4/{guid[:2]}/{guid}.chunk"
+        h = c.get("hash", 0); g = c.get("group", 0) % 100
+        return f"ChunksV3/{g:02d}/{h:016X}_{guid}.chunk"
+
+def load_manifest(version, manifest_path_url):
+    cache = os.path.join(cache_dir(), "manifests",
+                         version.replace("/", "_") + ".json")
+    if os.path.exists(cache):
+        with open(cache, encoding="utf-8") as f:
+            return Manifest(json.load(f))
+    status, raw = http("GET", manifest_path_url, timeout=300, retries=3)
+    if status != 200:
+        raise RuntimeError(f"manifest download HTTP {status}")
+    text = raw.decode("utf-8")
+    with open(cache, "w", encoding="utf-8") as f: f.write(text)
+    return Manifest(json.loads(text))
+
+# ---------------------------------------------------------------- chunks
+class Progress:
+    def __init__(self, total, label, counts=False):
+        self.total, self.label, self.counts = total, label, counts
+        self.done = 0; self.lock = threading.Lock(); self.t0 = time.time()
+        self._stop = False; self.thread = threading.Thread(target=self._run, daemon=True)
+    def add(self, n):
+        with self.lock: self.done += n
+    def _run(self):
+        while not self._stop:
+            time.sleep(0.5)
+            with self.lock: done = self.done
+            pct = 100.0 * done / max(self.total, 1)
+            rate = done / max(time.time() - self.t0, 0.001)
+            eta = (self.total - done) / max(rate, 0.001)
+            if self.counts:
+                shown, srate, seta = f"{int(done)}/{int(self.total)}", f"{rate:.1f} files/s", f"{eta:.0f}s"
+            else:
+                shown, srate, seta = human(done), human(rate) + "/s", f"{eta/60:.1f}min"
+            sys.stdout.write(f"\r  {self.label} {shown} ({pct:5.1f}%) {srate} ETA {seta}  ")
+            sys.stdout.flush()
+    def __enter__(self): self.thread.start(); return self
+    def __exit__(self, *a):
+        self._stop = True; self.thread.join(timeout=1)
+        sys.stdout.write("\n"); sys.stdout.flush()
+
+def parse_chunk(raw):
+    if len(raw) < CHUNK_HEADER_V2: raise ValueError("chunk too small")
+    magic, _ver, hsize, _dsize = struct.unpack_from("<IIII", raw, 0)
+    if magic != CHUNK_MAGIC: raise ValueError("bad chunk magic")
+    # layout: magic4 ver4 hsize4 dsize4 | guid16 | rollingHash8 | storedAs1 | sha1 20 | hashType1 (v2, 62B)
+    stored_as = raw[40]
+    sha = raw[41:61].hex()
+    payload = raw[hsize:]
+    data = zlib.decompress(payload) if stored_as & 1 else payload
+    return data, sha
+
+def fetch_chunk(cloud, manifest, guid, sem_stats):
+    """download (or reuse cached) chunk; returns uncompressed bytes."""
+    cache_file = os.path.join(cache_dir(), "chunks", guid)
+    if os.path.exists(cache_file):
+        with open(cache_file, "rb") as f: raw = f.read()
+        try:
+            data, sha = parse_chunk(raw)
+            if sha == manifest.chunks.get(guid, {}).get("sha1"):
+                sem_stats["reuse"] += 1
+                return data
+        except Exception:
+            pass
+    urls = [cloud + "/Builds/Fortnite/CloudDir/" + manifest.chunk_relpath(guid)]
+    if manifest.chunk_subdir != "ChunksV4":
+        urls.append(cloud + "/Builds/Fortnite/CloudDir/ChunksV4/"
+                    f"{guid[:2]}/{guid}.chunk")
+    last = None
+    for url in urls:
+        for attempt in range(4):
+            try:
+                status, raw = http("GET", url, timeout=180)
+                if status == 200:
+                    data, sha = parse_chunk(raw)
+                    want = manifest.chunks.get(guid, {}).get("sha1")
+                    if want and sha != want:
+                        raise ValueError("sha1 mismatch")
+                    tmp = cache_file + ".tmp"
+                    with open(tmp, "wb") as f: f.write(raw)
+                    os.replace(tmp, cache_file)
+                    sem_stats["dl"] += 1
+                    return data
+                last = f"HTTP {status}"
+                if status == 404 and attempt < 2:
+                    time.sleep(2 * (attempt + 1))  # R2 edge can 404 transiently
+                    continue
+                break  # hard 404 -> try next url form
+            except Exception as e:
+                last = e; time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"chunk {guid}: {last}")
+
+# ---------------------------------------------------------------- install
+def pick_build(builds, sel):
+    if not sel or sel == "live":
+        for b in builds:
+            if b.get("isLive"): return b
+        raise RuntimeError("no live build")
+    for b in builds:
+        if sel in b["version"]: return b
+    raise RuntimeError(f"no build matches '{sel}' (try: neo list)")
+
+def version_dir_name(version): return version
+
+def free_space_shortages(needs):
+    """[(path, free, needed)] for each (path, needed-bytes) whose volume is short.
+
+    Engineering note 9: an install that fills the system disk mid-download is a
+    bug, not a footgun — so both bulk paths are checked up front, before any
+    bytes move. Unstat-able paths are left to fail later with a clearer error.
+    """
+    shortages = []
+    for path, need in needs:
+        try:
+            free = shutil.disk_usage(path).free
+        except OSError:
+            continue
+        if free < need:
+            shortages.append((path, free, need))
+    return shortages
+
+def cmd_install(args, auth):
+    cfg = load_config()
+    builds = get_builds(auth)
+    build = pick_build(builds, args.version)
+    version = build["version"]
+    size = build["fileSizeBytes"]
+    print(f"Build: {version}  ({human(size)})")
+    clouds = get_distribution_points()
+    if not clouds: err("no distribution points"); sys.exit(1)
+    cloud = clouds[0]
+    manifest_url = cloud + "/" + build["manifestPath"].lstrip("/")
+    print("Fetching manifest…")
+    m = load_manifest(version, manifest_url)
+
+    root = os.path.abspath(os.path.expanduser(args.dir or cfg["install_root"]))
+    inst_dir = os.path.join(root, version_dir_name(version))
+    os.makedirs(inst_dir, exist_ok=True)
+    print(f"Installing to: {inst_dir}")
+
+    needed = sorted({g for f in m.files for g, _, _ in f["parts"]})
+    total = sum(m.chunks.get(g, {}).get("size", 0) for g in needed)
+    print(f"{len(m.files)} files, {len(needed)} chunks ({human(total)} download worst-case)")
+    total_raw = sum(size for f in m.files for _, _, size in f["parts"])
+    if not getattr(args, "force", False):
+        short = free_space_shortages([(cache_dir(), total), (inst_dir, total_raw)])
+        for path, free, need in short:
+            err(f"not enough space for {os.path.dirname(path) or path}: "
+                f"{human(free)} free, {human(need)} needed")
+        if short:
+            err("move the cache (neo config cache_dir) or install elsewhere (-d DIR); "
+                "override with --force")
+            sys.exit(1)
+
+    stats = {"dl": 0, "reuse": 0}
+    chunk_cache = {}
+    cache_lock = threading.Lock()
+    workers = args.jobs or cfg["workers"]
+
+    def get_chunk(guid):
+        data = fetch_chunk(cloud, m, guid, stats)
+        with cache_lock:
+            if len(chunk_cache) > 96:
+                for k in list(chunk_cache)[:32]: chunk_cache.pop(k, None)
+            chunk_cache[guid] = data
+        return len(data)
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex, Progress(total, "chunks") as pr:
+        futs = {ex.submit(get_chunk, g): g for g in needed}
+        for fut in cf.as_completed(futs):
+            pr.add(m.chunks.get(futs[fut], {}).get("size", 0))
+            fut.result()
+
+    print(f"  chunks: {stats['dl']} downloaded, {stats['reuse']} reused from cache")
+    print("Assembling files…")
+    bad = []
+    with Progress(len(m.files), "files", counts=True) as pr:
+        for f in m.files:
+            try:
+                assemble_file(inst_dir, f, chunk_cache, cloud, m)
+            except Exception as e:
+                bad.append((f["name"], str(e)))
+            pr.add(1)
+    # persist manifest copy + state
+    with open(os.path.join(inst_dir, ".neo-manifest.json"), "w") as fh:
+        json.dump(m.d, fh)
+    st = load_state()
+    st["installs"][version] = {"path": inst_dir, "build": build}
+    save_state(st)
+    if bad:
+        err(f"{len(bad)} file(s) failed:")
+        for n, e in bad[:10]: print(f"    {n}: {e}")
+        sys.exit(1)
+    if not getattr(args, "keep_cache", False):
+        purged = 0
+        for g in needed:
+            p = os.path.join(cache_dir(), "chunks", g)
+            try: os.remove(p); purged += 1
+            except OSError: pass
+        print(f"  purged {purged} cached chunks (keep with --keep-cache)")
+    ok(f"Installed {version} → {inst_dir}")
+
+def install_path(inst_dir, name):
+    """Resolve a manifest-supplied filename inside `inst_dir`.
+
+    File names come off the CDN, so refuse anything that walks out of the install
+    directory ("../../x", "/etc/x") instead of writing it. Symlinks inside the build
+    are still honoured — they are just created at this validated destination.
+    """
+    root = os.path.normpath(inst_dir)
+    dest = os.path.normpath(os.path.join(root, name))
+    if dest != root and not dest.startswith(root + os.sep):
+        raise RuntimeError(f"unsafe filename in manifest (outside {root}): {name!r}")
+    return dest
+
+def assemble_file(inst_dir, f, chunk_cache, cloud, m):
+    dest = install_path(inst_dir, f["name"])
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    if f["symlink"]:
+        if os.path.lexists(dest): os.remove(dest)
+        os.symlink(f["symlink"], dest)
+        return
+    h = hashlib.sha1()
+    with open(dest + ".tmp", "wb") as out:
+        for guid, off, size in f["parts"]:
+            data = chunk_cache.get(guid)
+            if data is None:
+                with open(os.path.join(cache_dir(), "chunks", guid), "rb") as fh:
+                    data, _ = parse_chunk(fh.read())
+            out.write(data[off:off + size])
+            h.update(data[off:off + size])
+    if f["sha1"] and h.hexdigest() != f["sha1"]:
+        os.remove(dest + ".tmp")
+        raise RuntimeError(f"sha1 mismatch (want {f['sha1'][:12]}… got {h.hexdigest()[:12]}…)")
+    os.replace(dest + ".tmp", dest)
+    if f["exec"]: os.chmod(dest, 0o755)
+
+def cmd_verify(args, auth):
+    st = load_state()
+    version, inst = select_install(args.version, st)
+    print(f"Verifying {version} at {inst['path']}")
+    with open(os.path.join(inst["path"], ".neo-manifest.json")) as f:
+        m = Manifest(json.load(f))
+    bad, missing = [], []
+    with Progress(len(m.files), "files") as pr:
+        for f in m.files:
+            p = os.path.join(inst["path"], f["name"])
+            if f["symlink"]:
+                if not os.path.islink(p): missing.append(f)
+            elif not os.path.exists(p):
+                missing.append(f)
+            else:
+                h = hashlib.sha1()
+                with open(p, "rb") as fh:
+                    for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
+                if f["sha1"] and h.hexdigest() != f["sha1"]: bad.append(f)
+            pr.add(1)
+    if not missing and not bad:
+        ok("all files verified")
+        return
+    warn(f"{len(missing)} missing, {len(bad)} corrupted")
+    if not getattr(args, "repair", False):
+        warn(f"repair with: neo verify {version} --repair")
+        return
+    repair_files(inst["path"], missing + bad, m)
+
+def repair_files(inst_path, files, m):
+    """Re-fetch only the chunks the broken files need, rebuild, re-hash."""
+    clouds = get_distribution_points()
+    if not clouds:
+        err("no distribution points — cannot repair"); sys.exit(1)
+    cloud = clouds[0]
+    stats = {"dl": 0, "reuse": 0}
+    cache_map = {}
+    fixed = failed = 0
+    with Progress(len(files), "repairing", counts=True) as pr:
+        for f in files:
+            try:
+                for guid, _off, _size in f["parts"]:
+                    if guid not in cache_map:
+                        cache_map[guid] = fetch_chunk(cloud, m, guid, stats)
+                assemble_file(inst_path, f, cache_map, cloud, m)
+                if not f["symlink"]:
+                    h = hashlib.sha1()
+                    with open(install_path(inst_path, f["name"]), "rb") as fh:
+                        for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
+                    if f["sha1"] and h.hexdigest() != f["sha1"]:
+                        raise RuntimeError("sha1 still mismatched after rebuild")
+                fixed += 1
+            except Exception as e:
+                failed += 1
+                err(f"  {f['name']}: {e}")
+            pr.add(1)
+    print(f"  chunks: {stats['dl']} downloaded, {stats['reuse']} reused from cache")
+    if failed:
+        err(f"{failed} file(s) still failing"); sys.exit(1)
+    ok(f"repaired {fixed} file(s)")
+
+def cmd_import(args, auth):
+    """Register a build folder that already exists on disk (no download).
+
+    Mirrors the official client's import_neo_build: the folder must be a build
+    root (contains FortniteGame/ and Engine/). The manifest is fetched so later
+    `neo verify` runs have something to check against.
+    """
+    path = os.path.abspath(os.path.expanduser(args.path))
+    for sub in ("FortniteGame", "Engine"):
+        if not os.path.isdir(os.path.join(path, sub)):
+            err(f"{path} does not look like a build root (no {sub}/)")
+            err("pick the folder that contains FortniteGame/ and Engine/")
+            sys.exit(1)
+    builds = get_builds(auth)
+    build = pick_build(builds, args.version)
+    version = build["version"]
+    clouds = get_distribution_points()
+    if not clouds:
+        err("no distribution points — cannot fetch the manifest"); sys.exit(1)
+    m = load_manifest(version, clouds[0] + "/" + build["manifestPath"].lstrip("/"))
+    with open(os.path.join(path, ".neo-manifest.json"), "w") as fh:
+        json.dump(m.d, fh)
+    st = load_state()
+    st["installs"][version] = {"path": path, "build": build, "imported": True}
+    save_state(st)
+    ok(f"registered {version} → {path}")
+    print(f"check it with: neo verify {version}")
+
+def cmd_uninstall(args):
+    st = load_state()
+    version, inst = select_install(args.version, st)
+    path = inst["path"]
+    print(f"Uninstalling {version}\n  {path}")
+    if os.path.isdir(path):
+        # only rmtree directories that still carry our manifest — never whatever
+        # a hand-edited state.json might point at
+        if not os.path.exists(os.path.join(path, ".neo-manifest.json")):
+            err(f"refusing: no .neo-manifest.json in {path} (not a neo install?)")
+            err("dropping the state entry only; delete the folder by hand")
+            st["installs"].pop(version, None)
+            save_state(st)
+            sys.exit(1)
+        if not getattr(args, "yes", False):
+            try:
+                ans = input(f"type 'remove' to delete {path}: ")
+            except EOFError:
+                ans = ""
+            if ans.strip().lower() != "remove":
+                err("aborted (use --yes to skip the prompt)")
+                sys.exit(1)
+        shutil.rmtree(path)
+    else:
+        warn("install directory already gone — dropping the state entry")
+    st["installs"].pop(version, None)
+    save_state(st)
+    ok(f"removed {version}")
+
+def cmd_cache(args):
+    action = (args.action or "stats").lower()
+    cache = cache_dir()
+    if action == "clear":
+        subs = ["chunks", "manifests"] if getattr(args, "all", False) else ["chunks"]
+        removed = freed = 0
+        for sub in subs:
+            d = os.path.join(cache, sub)
+            for name in os.listdir(d) if os.path.isdir(d) else []:
+                p = os.path.join(d, name)
+                try:
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+                    removed += 1
+                except OSError:
+                    pass
+        ok(f"removed {removed} file(s), {human(freed)} freed ({cache})")
+        return
+    for sub in ("chunks", "manifests"):
+        d = os.path.join(cache, sub)
+        n = size = 0
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                try:
+                    size += os.path.getsize(os.path.join(d, name))
+                    n += 1
+                except OSError:
+                    pass
+        print(f"{sub:<10} {n:>7} file(s)  {human(size):>10}")
+    print(f"cache dir: {cache}")
+
+def changelist_number(version):
+    """Build version string -> its CL number (0 when absent), for newest-wins sorting."""
+    mm = re.search(r"CL-(\d+)", version)
+    return int(mm.group(1)) if mm else 0
+
+def select_install(sel, st):
+    installs = st.get("installs", {})
+    if not installs: err("nothing installed yet — run: neo install"); sys.exit(1)
+    if not sel or sel == "live":
+        version = sorted(installs, key=changelist_number)[-1]  # newest by CL number
+    else:
+        version = next((v for v in installs if sel in v), None)
+        if not version: err(f"no install matches '{sel}'"); sys.exit(1)
+    return version, installs[version]
+
+# ---------------------------------------------------------------- launch
+def to_winpath(path, prefix=None):
+    r"""Map a unix path into the prefix's Windows namespace.
+
+    Anything inside <prefix>/drive_c becomes C:\...; everything else is reached
+    through Wine's Z: drive. Paths inside the prefix must NOT be given as Z:
+    paths — that is what mangled -basedir (see docs/protocol.md §8.1).
+    """
+    prefix = os.environ.get("WINEPREFIX") if prefix is None else prefix
+    if prefix:
+        dc = os.path.realpath(os.path.join(prefix, "drive_c"))
+        rp = os.path.realpath(path)
+        if rp == dc or rp.startswith(dc + os.sep):
+            return "C:" + rp[len(dc):].replace(os.sep, "\\")
+    return "Z:" + path.replace("/", "\\")
+
+# The official argument vector, character-for-character, as read out of
+# GameLauncher.LaunchAsync in NeoLauncher 1.0.7 (order included). Only known
+# deviation: -basedir is passed bare here -- the Windows client quotes it
+# because it builds one raw command line; through umu/wine the embedded quotes
+# get re-escaped and mangle the path (docs/protocol.md 8.1).
+OFFICIAL_ARGS = ("-epicapp=Fortnite", "-epicenv=Prod", "-epicportal",
+                 "-skippatchcheck", "-nobe", "-fromfl=eac",
+                 "-AUTH_LOGIN=unused", "-AUTH_TYPE=exchangecode")
+
+def encode_game_modifiers(mods):
+    """Mirror GameLauncher.EncodeGameModifiers (NeoLauncher.dll).
+
+    The web UI always posts `{editOnRelease, instantReset, disablePreEdit,
+    bubblePerformance}` as JSON; the host concatenates `-NeoModifiers=` with
+    that object's GetRawText(), and skips the arg only when the object is
+    missing or literally `{}`. All-false is *not* `{}`, so the Windows client
+    still sends the payload — we omit the no-op form so the default argv stays
+    the live-validated 12-flag vector (protocol.md §8.2).
+    """
+    payload = {
+        "editOnRelease": bool((mods or {}).get("editOnRelease")),
+        "instantReset": bool((mods or {}).get("instantReset")),
+        "disablePreEdit": bool((mods or {}).get("disablePreEdit")),
+        "bubblePerformance": False,
+    }
+    if not any(payload[k] for k in ("editOnRelease", "instantReset", "disablePreEdit")):
+        return None
+    return "-NeoModifiers=" + json.dumps(payload, separators=(",", ":"))
+
+def resolve_modifiers(args, cfg=None):
+    """Config values, then per-launch `--edit-on-release` / `--no-…` overrides."""
+    cfg = cfg if cfg is not None else load_config()
+    mods = {}
+    for cfg_key, json_key in MODIFIER_CONFIG_KEYS:
+        mods[json_key] = bool(cfg.get(cfg_key))
+        override = getattr(args, cfg_key, None)
+        if override is not None:
+            mods[json_key] = bool(override)
+    return mods
+
+def resolve_launch_options(args, cfg=None):
+    """Persistent `launch_options` (the Windows Options → Launch text field), then
+    any extra UE4 args on this invocation. CLI extras win by coming last."""
+    cfg = cfg if cfg is not None else load_config()
+    stored = str(cfg.get("launch_options") or "").strip()
+    extra = list(args.extra or [])
+    if extra and extra[0] == "--":
+        extra = extra[1:]
+    bits = shlex.split(stored, posix=True) if stored else []
+    return bits + extra
+
+def game_argv(basedir_win, code1, code2, fltoken, extra=(), modifiers=None):
+    argv = ["-basedir=" + basedir_win, *OFFICIAL_ARGS,
+            "-AUTH_PASSWORD=" + code1, "-p=" + code2, "-fltoken=" + fltoken]
+    encoded = encode_game_modifiers(modifiers)
+    if encoded:
+        argv.append(encoded)
+    argv.extend(extra)
+    return argv
+
+def fl_token():
+    return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(24))
+
+# When a game process dies on one of Wine's *own* built-in APIs ("wine: … to
+# unimplemented function <module>.<fn>, aborting"), naming functions Wine has
+# shipped for years, the Wine/Proton build itself is crashing before the game
+# runs — not a bug in this launch vector and not the prefix (a prefix rebuilt
+# from scratch reproduces it verbatim). The fix is to run a different Proton:
+# GE-Proton is the stable, widely-tested choice. docs/engineering-notes.md #14.
+WINE_ABORT_RE = re.compile(r"to unimplemented function \S+\.\S+, aborting")
+WINE_ABORT_HINT = (
+    "Wine aborted on 'unimplemented function' — that Proton build is crashing at\n"
+    "startup (before the game runs). Not a neo bug; a fresh prefix reproduces it, so\n"
+    "the fix is a different Proton, not a new prefix. Set GE-Proton as the default and\n"
+    "relaunch:\n"
+    "    neo config proton GE-Proton      # persistent default\n"
+    "    neo launch\n"
+    "or just for one launch:\n"
+    "    PROTONPATH=GE-Proton neo launch"
+)
+
+
+def wine_abort_hint(stderr):
+    """Guidance when a launch died on Wine's 'unimplemented function' abort
+    (that Proton build crashing at startup), else None."""
+    if WINE_ABORT_RE.search(stderr or ""):
+        return WINE_ABORT_HINT
+    return None
+
+
+def resolve_proton(args):
+    """umu picks the Proton from the PROTONPATH *environment variable*, not a CLI
+    flag. Resolution order: the --proton flag > the persistent `proton` config
+    setting > whatever PROTONPATH the caller already exported > umu's own default."""
+    if getattr(args, "proton", None):
+        return args.proton
+    return load_config().get("proton")
+
+
+def _run_launch(cmd, cwd, env=None):
+    """Run umu/proton with the game, streaming stderr live; return (rc, stderr)."""
+    chunks = []
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stderr=subprocess.PIPE)
+    with proc.stderr:
+        for chunk in proc.stderr:
+            text = chunk.decode("utf-8", "replace")
+            chunks.append(text)
+            sys.stderr.write(text)
+            sys.stderr.flush()
+    return proc.wait(), "".join(chunks)
+
+def cmd_launch(args, auth):
+    st = load_state()
+    _version, inst = select_install(args.version, st)
+    win64 = os.path.join(inst["path"], "FortniteGame", "Binaries", "Win64")
+    if not os.path.isdir(win64):
+        err(f"game binaries not found: {win64}"); sys.exit(1)
+
+    ls = lightswitch(auth)
+    if ls.get("banned"): err("banned: " + str(ls.get("banReason", ""))); sys.exit(1)
+    if ls.get("status") != "UP":
+        warn("service status: " + str(ls.get("status")) + " — " + str(ls.get("message", "")))
+    try:
+        if prism_ban(auth).get("banned"):
+            err("banned (prism): " + str(prism_ban(auth).get("reason", ""))); sys.exit(1)
+    except Exception: pass
+
+    # prism-patched client (mirror of PrismService: all assets -> prism dir;
+    # exe is required, other assets are best-effort like the Windows launcher)
+    assets = prism_assets(auth)
+    prism_dir = os.path.join(data_dir(), "prism")
+    exe = None
+    for a in assets or []:
+        dest = os.path.join(prism_dir, a["filename"])
+        try:
+            good = False
+            if os.path.exists(dest):
+                h = hashlib.sha256()
+                with open(dest, "rb") as fh:
+                    for b in iter(lambda: fh.read(1 << 20), b""): h.update(b)
+                good = h.hexdigest().lower() == a["hash256"].lower()
+            if not good:
+                print(f"  prism: {a['filename']}…")
+                status, raw = http("GET", a["url"], timeout=600)
+                if status != 200: raise RuntimeError(f"HTTP {status}")
+                if hashlib.sha256(raw).hexdigest().lower() != a["hash256"].lower():
+                    raise RuntimeError("sha256 mismatch")
+                with open(dest + ".tmp", "wb") as fh: fh.write(raw)
+                os.replace(dest + ".tmp", dest)
+            if a["filename"] == GAME_EXE_NAME: exe = dest
+        except Exception as e:
+            if a["filename"] == GAME_EXE_NAME:
+                err(f"prism exe download failed: {e}"); sys.exit(1)
+            warn(f"prism asset {a['filename']} failed ({e}) — continuing")
+    if not exe:
+        exe = os.path.join(prism_dir, GAME_EXE_NAME)
+        if not os.path.exists(exe):
+            err(f"prism did not provide {GAME_EXE_NAME}"); sys.exit(1)
+
+    code1, exp1 = auth.exchange_code()
+    code2, _exp2 = auth.exchange_code()
+    if exp1: print(f"  exchange codes valid for ~{exp1}s (game must redeem before then)")
+    fltoken = fl_token()
+
+    basedir_win = to_winpath(win64)
+    extra = resolve_launch_options(args)
+    argv = game_argv(basedir_win, code1, code2, fltoken, extra,
+                     modifiers=resolve_modifiers(args))
+
+    umu = os.environ.get("NEO_UMU", "umu-run")
+    proton = resolve_proton(args)
+    env = None
+    if proton:
+        env = dict(os.environ)
+        env["PROTONPATH"] = proton
+    cmd = [umu, exe, *argv]
+    print("Launching:", exe)
+    if proton:
+        print("   PROTONPATH=" + proton)
+    for a in argv:
+        shown = a if not a.startswith(("-AUTH_PASSWORD=", "-p=")) else a.split("=")[0] + "=***"
+        print("   ", shown)
+    if args.dry_run: return
+    rc, stderr_text = _run_launch(cmd, win64, env=env)
+    print(f"\ngame exited: {rc}")
+    if rc != 0:
+        hint = wine_abort_hint(stderr_text)
+        if hint:
+            print()
+            warn(hint)
+
+# ---------------------------------------------------------------- login
+CHALLENGE = (ACCOUNT + "/api/oauth/challenge/Discord?"   # NB: case-sensitive route!
+             + urllib.parse.urlencode({"clientId": CLIENT_ID, "redirectUri": REDIRECT_URI}))
+
+def install_scheme_handler():
+    script = os.path.abspath(__file__)
+    entry = os.path.join(os.path.expanduser("~/.local/share/applications"),
+                         "neolauncher-callback.desktop")
+    os.makedirs(os.path.dirname(entry), exist_ok=True)
+    with open(entry, "w") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Neo Login Callback\n"
+                f"Exec=python3 {script} login --callback %u\nNoDisplay=true\n"
+                "MimeType=x-scheme-handler/neolauncher;\n")
+    try:
+        subprocess.run(["xdg-mime", "default", "neolauncher-callback.desktop",
+                        "x-scheme-handler/neolauncher"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        warn("could not auto-register neolauncher:// handler (xdg-mime missing)")
+
+def cmd_login(args):
+    auth = Auth()
+    if args.callback:
+        q = urllib.parse.urlparse(args.callback).query
+        code = urllib.parse.parse_qs(q).get("code", [None])[0]
+        if not code or code in ("…", "...", "CODE") or len(code) < 16:
+            err("that's a placeholder/truncated code, not the real one.\n"
+                "  Copy the COMPLETE neolauncher://callback/auth?code=<long-string> URL\n"
+                "  from the browser address bar (the code is ~30+ chars, no '…' in it),\n"
+                "  or just re-run: neo login  and click Authorize again for a fresh code.")
+            sys.exit(1)
+        try:
+            auth.login_code(code)
+            msg = f"Logged in as {auth.d['display_name']} ({auth.d['account_id']})"
+            ok(msg)
+        except RuntimeError as e:
+            msg = ("Login failed (code wrong, already used, or expired — "
+                   "just re-run: neo login): ") + str(e)[:160]
+            err(msg)
+        except Exception as e:
+            msg = f"Login failed: {e}"
+            err(msg)
+        # callback runs with no terminal (launched by the DE) — notify the user
+        notify("NeoFN login", msg)
+        sys.exit(0 if auth.logged_in else 1)
+    if args.code:
+        auth.login_code(args.code)
+        ok(f"logged in as {auth.d['display_name']}")
+        return
+    install_scheme_handler()
+    print("Opening browser for Discord login…")
+    print("  (if it fails, open this URL manually:)")
+    print(f"  {CHALLENGE}")
+    print("After approving, your browser will open neolauncher://callback/auth?code=…\n"
+          "neo handles it automatically; or paste the code manually:\n"
+          "    neo login --code <CODE>")
+    import webbrowser
+    webbrowser.open(CHALLENGE)
+
+def cmd_status(args, auth):
+    ls = lightswitch(auth)
+    col = C("32", "UP") if ls.get("status") == "UP" else C("31", ls.get("status", "?"))
+    print(f"Fortnite service : {col}  {ls.get('message','')}")
+    print(f"Banned           : {'yes — ' + str(ls.get('banReason')) if ls.get('banned') else 'no'}")
+    print(f"Allowed actions  : {ls.get('allowedActions') or '—'}")
+    if auth.logged_in:
+        try:
+            b = prism_ban(auth)
+            print(f"Prism ban        : {'yes — ' + str(b.get('reason')) if b.get('banned') else 'no'}")
+        except Exception as e: warn(f"prism: {e}")
+        try:
+            print(f"Fortnite access  : {fortnite_access(auth)}")
+        except Exception as e: warn(f"fortniteAccess: {e}")
+        try:
+            print("Entitlements     :", describe_entitlements(store_entitlements(auth)))
+        except Exception as e: warn(f"store entitlements: {e}")
+    try:
+        oc = jhttp("GET", LAUNCHER + "/api/public/onlinecount")
+        print(f"Players online   : {oc}")
+    except Exception: pass
+    if getattr(args, "watch", False):
+        if not auth.logged_in:
+            err("--watch needs a logged-in account (fortniteAccess is per-account)")
+            sys.exit(1)
+        interval = max(10, getattr(args, "interval", 0) or 60)
+        print(f"watching for access every {interval}s — Ctrl-C to stop")
+        while True:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            try:
+                granted = fortnite_access(auth)
+            except Exception as e:
+                granted = None
+                warn(f"[{stamp}] fortniteAccess unreachable ({e})")
+            if granted:
+                ok(f"[{stamp}] fortniteAccess: granted — run: neo launch")
+                notify("Neo access granted", "fortniteAccess flipped to true — run: neo launch")
+                return
+            print(f"[{stamp}] fortniteAccess: "
+                  f"{granted if granted is not None else 'unreachable'}", flush=True)
+            time.sleep(interval)
+
+def cmd_news(args):
+    payload = get_news()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=1)[:8000])
+        return
+    items = format_news(payload)
+    if not items:
+        warn("no news items found — raw payload with: neo news --json")
+        return
+    for date, title, body in items:
+        print(f"{C('2', date + ' ')}{C('1', title)}")
+        if body: print(f"  {body}")
+
+def cmd_log(args):
+    path = args.path or find_game_log()
+    if not path or not os.path.exists(path):
+        err("no FortniteGame.log found — pass -p /path/to/FortniteGame.log")
+        err("hint: <WINEPREFIX>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/")
+        sys.exit(1)
+    print(C("2", path))
+    def show(line):
+        print(LOG_HIGHLIGHT.sub(lambda m: C("33", m.group(0)), line.rstrip("\n")))
+    with open(path, encoding="utf-8", errors="replace") as f:
+        if args.follow:
+            for line in f.readlines()[-80:]:
+                show(line)
+            while True:            # tail -f: the KeyboardInterrupt handler exits cleanly
+                line = f.readline()
+                if line:
+                    show(line)
+                else:
+                    time.sleep(0.5)
+        else:
+            for line in f:
+                show(line)
+
+def find_game_log(explicit=None):
+    if explicit:
+        return explicit
+    prefix = os.environ.get("WINEPREFIX")
+    if not prefix:
+        return None
+    rel = ["drive_c", "users", "*", "AppData", "Local",
+           "FortniteGame", "Saved", "Logs", "FortniteGame.log"]
+    hits = glob.glob(os.path.join(prefix, *rel))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+# ---------------------------------------------------------------- friends (XMPP)
+# Reconstruction of NeoXmppClient (protocol.md §12): raw XMPP over a websocket,
+# SASL PLAIN with account id + the account access token, official-style bind
+# resource. NEO_XMPP overrides the endpoint (ws:// URLs work — handy for tests
+# and for pointing at a capture proxy).
+
+class WsError(Exception): pass
+
+def ws_build_text_frame(text, mask=None):
+    """One RFC 6455 text frame, masked as a client must."""
+    payload = text.encode("utf-8")
+    mask = os.urandom(4) if mask is None else mask
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    n = len(payload)
+    if n < 126:    head = struct.pack("!BB", 0x81, 0x80 | n)
+    elif n < 65536: head = struct.pack("!BBH", 0x81, 0x80 | 126, n)
+    else:           head = struct.pack("!BBQ", 0x81, 0x80 | 127, n)
+    return head + mask + masked
+
+def ws_parse_frame(buf):
+    """(fin, opcode, payload, consumed) for the first frame in buf, else None."""
+    if len(buf) < 2: return None
+    fin, opcode, masked, n = buf[0] & 0x80, buf[0] & 0x0F, buf[1] & 0x80, buf[1] & 0x7F
+    off = 2
+    if n == 126:
+        if len(buf) < 4: return None
+        n, off = int.from_bytes(buf[2:4], "big"), 4
+    elif n == 127:
+        if len(buf) < 10: return None
+        n, off = int.from_bytes(buf[2:10], "big"), 10
+    moff = off + 4 if masked else off
+    if len(buf) < moff + n: return None
+    data = buf[moff:moff + n]
+    if masked:
+        mk = buf[off:off + 4]
+        data = bytes(b ^ mk[i % 4] for i, b in enumerate(data))
+    return bool(fin), opcode, bytes(data), moff + n
+
+class WsClient:
+    """The ~10% of RFC 6455 an XMPP-over-websocket client needs."""
+
+    def __init__(self, url, timeout=15):
+        self.url, self.timeout = url, timeout
+        self.buf = b""
+
+    def connect(self):
+        u = urllib.parse.urlsplit(self.url)
+        tls = u.scheme == "wss"
+        host, port = u.hostname, u.port or (443 if tls else 80)
+        path = (u.path or "/") + ("?" + u.query if u.query else "")
+        sock = socket.create_connection((host, port), timeout=self.timeout)
+        if tls:
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+        self.sock = sock
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\n"
+                      f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                      f"Sec-WebSocket-Version: 13\r\n"
+                      f"Sec-WebSocket-Protocol: xmpp\r\n"  # required — 400 without
+                      f"User-Agent: {UA}\r\n\r\n").encode())
+        sock.settimeout(self.timeout)
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = sock.recv(4096)
+            if not chunk: raise WsError("websocket closed during handshake")
+            head += chunk
+            if len(head) > 65536: raise WsError("handshake response too large")
+        status = head.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+        if " 101 " not in status:
+            body = head.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in head else b""
+            try:
+                self.sock.settimeout(1.0)
+                body += self.sock.recv(4096)
+            except Exception:
+                pass
+            detail = body.decode("utf-8", "replace").strip()
+            raise WsError(f"websocket handshake refused: {status}"
+                          + (f" — {detail[:200]}" if detail else ""))
+        self.buf = head.split(b"\r\n\r\n", 1)[1]
+
+    def send(self, text):
+        self.sock.sendall(ws_build_text_frame(text))
+
+    def recv(self, timeout=None):
+        """Next text message; None on timeout. Ping→pong, close→WsError."""
+        self.sock.settimeout(self.timeout if timeout is None else max(timeout, 0.001))
+        parts = b""
+        while True:
+            frame = ws_parse_frame(self.buf)
+            while frame is None:
+                try:
+                    chunk = self.sock.recv(65536)
+                except socket.timeout:
+                    return None
+                if not chunk: raise WsError("websocket closed")
+                self.buf += chunk
+                frame = ws_parse_frame(self.buf)
+            fin, opcode, payload, consumed = frame
+            self.buf = self.buf[consumed:]
+            if opcode == 8: raise WsError("websocket close frame")
+            if opcode == 9:
+                self.sock.sendall(bytes([0x88, 0x80]) + os.urandom(4)); continue
+            if opcode == 10: continue
+            parts += payload
+            if fin: return parts.decode("utf-8", "replace")
+
+    def close(self):
+        try:
+            self.sock.sendall(bytes([0x88, 0x80]) + os.urandom(4))
+            self.sock.close()
+        except Exception:
+            pass
+
+def sasl_plain(username, token):
+    return base64.b64encode(("\0" + username + "\0" + token).encode()).decode()
+
+def parse_presence(frame):
+    if not frame.lstrip().startswith("<presence"): return None
+    m = re.search(r'from=["\']([^"\']+)', frame)
+    if not m: return None
+    d = {"from": m.group(1)}
+    for key, pat in (("type", r'type=["\']([^"\']+)'), ("show", r"<show>([^<]*)</show>"),
+                     ("status", r"<status>([^<]*)</status>")):
+        mm = re.search(pat, frame)
+        d[key] = mm.group(1) if mm else ""
+    return d
+
+def parse_roster(frame):
+    try:
+        root = xml.etree.ElementTree.fromstring(frame)
+    except Exception:
+        return []
+    items = []
+    for el in root.iter():
+        if el.tag == "item" or el.tag.endswith("}item"):
+            items.append({"jid": el.get("jid", ""), "name": el.get("name", ""),
+                          "subscription": el.get("subscription", "")})
+    return items
+
+def resolve_names(auth, account_ids):
+    """account id → display name, via the batch public-profile endpoint (§12.1)."""
+    out = {}
+    ids = [i for i in account_ids if i]
+    for i in range(0, len(ids), 50):
+        q = "&".join("accountId=" + urllib.parse.quote(a) for a in ids[i:i + 50])
+        try:
+            r = jhttp("GET", ACCOUNT + "/api/public/account?" + q,
+                      headers={"Authorization": "Bearer " + auth.access()})
+            for a in r if isinstance(r, list) else []:
+                if isinstance(a, dict) and a.get("id"):
+                    out[a["id"]] = a.get("displayName") or ""
+        except Exception:
+            pass
+    return out
+
+class XmppSession:
+    """The official client's flow: open → SASL PLAIN → re-open → bind → session."""
+
+    def __init__(self, account_id, token, verbose=False, url=None):
+        self.url = url or os.environ.get("NEO_XMPP") or XMPP_WS
+        self.account_id, self.token, self.verbose = account_id, token, verbose
+        self.last_sent = self.last_recv = ""
+        self.jid = ""
+        self.ws = None
+
+    def _send(self, stanza):
+        self.last_sent = stanza
+        if self.verbose: print("→", stanza)
+        self.ws.send(stanza)
+
+    def _read(self, timeout=None):
+        frame = self.ws.recv(timeout=timeout)
+        if frame is not None:
+            self.last_recv = frame
+            if self.verbose: print("←", frame)
+        return frame
+
+    def _recv(self, want, timeout=15):
+        deadline = time.time() + timeout
+        while True:
+            frame = self._read(timeout=max(deadline - time.time(), 0.001))
+            if frame is None:
+                raise WsError(f"timed out waiting for {want!r}; last exchange:\n"
+                              f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
+            if want in frame: return frame
+
+    def _recv_iq(self, iq_id, timeout=15):
+        """Wait for the iq reply carrying our id. Servers answer empty-bodied
+        iqs self-closing (<iq type="result" id="x"/>), so matching a literal
+        </iq> never fires — correlate by id, XMPP-style. Quote styles vary."""
+        needles = (f'id="{iq_id}"', f"id='{iq_id}'")
+        deadline = time.time() + timeout
+        while True:
+            frame = self._read(timeout=max(deadline - time.time(), 0.001))
+            if frame is None:
+                raise WsError(f"timed out waiting for iq {iq_id!r}; last exchange:\n"
+                              f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
+            if any(n in frame for n in needles):
+                if 'type="error"' in frame or "type='error'" in frame:
+                    raise WsError(f"iq {iq_id} error: {frame[:300]}")
+                return frame
+
+    def _recv_any(self, timeout):
+        deadline = time.time() + timeout
+        while True:
+            frame = self._read(timeout=max(deadline - time.time(), 0.001))
+            if frame is None:
+                raise WsError(f"timed out; last exchange:\n"
+                              f"  sent: {self.last_sent[:200]}\n  got:  {self.last_recv[:200]}")
+            return frame
+
+    def _open(self):
+        host = urllib.parse.urlsplit(self.url).hostname
+        self._send(f'<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" '
+                   f'to="{host}" version="1.0"/>')
+        self._recv("<open")
+
+    def connect(self):
+        self.ws = WsClient(self.url)
+        self.ws.connect()
+        self._open()
+
+    def auth(self):
+        self._send('<auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">'
+                   + sasl_plain(self.account_id, self.token) + "</auth>")
+        while True:
+            frame = self._recv_any(15)
+            if "success" in frame: break
+            if "failure" in frame:
+                raise WsError("SASL PLAIN rejected: " + frame[:300])
+        self._open()  # RFC 6120: the stream restarts after SASL
+
+    def bind(self):
+        self._send('<iq type="set" id="bind_1"><bind '
+                   'xmlns="urn:ietf:params:xml:ns:xmpp-bind">'
+                   "<resource>neo_launcher_bind_1</resource></bind></iq>")
+        m = re.search(r"<jid>([^<]+)</jid>", self._recv_iq("bind_1"))
+        if m: self.jid = m.group(1)
+        self._send('<iq type="set" id="sess_1"><session '
+                   'xmlns="urn:ietf:params:xml:ns:xmpp-session"/></iq>')
+        self._recv_iq("sess_1")
+
+    def roster(self):
+        self._send('<iq type="get" id="ros_1"><query xmlns="jabber:iq:roster"/></iq>')
+        return self._recv_iq("ros_1")
+
+    def presence_snapshot(self, wait=3.0):
+        """Go available, gather presence for `wait` seconds, go unavailable."""
+        self._send("<presence/>")
+        seen = {}
+        deadline = time.time() + wait
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0: break
+            frame = self._read(timeout=remaining)
+            if frame is None: break
+            p = parse_presence(frame)
+            if p: seen[p["from"]] = p
+        self._send('<presence type="unavailable"/>')
+        return seen
+
+def friends_http(auth, raw=False):
+    """REST fallback when the websocket is unreachable (§12.1: /api/public/friends/).
+
+    Official query string included (?includePending=true); the payload may be a
+    bare list or wrapped, and friend entries key by accountId or id.
+    """
+    url = (FRIENDS + "/api/public/friends/"
+           + urllib.parse.quote(auth.d["account_id"]) + "?includePending=true")
+    r = jhttp("GET", url, headers={"Authorization": "Bearer " + auth.access()})
+    rows = r if isinstance(r, list) else []
+    if not rows and isinstance(r, dict):
+        rows = next((v for v in r.values() if isinstance(v, list)), [])
+    out = []
+    for f in rows:
+        if isinstance(f, dict) and (f.get("accountId") or f.get("id")):
+            out.append({"jid": f.get("accountId") or f.get("id"),
+                        "name": f.get("displayName") or "",
+                        "subscription": f.get("status") or f.get("friendshipStatus") or ""})
+    return (out, r) if raw else out
+
+def cmd_friends(args, auth):
+    if not auth.logged_in: err("Not logged in. Run: neo login"); sys.exit(1)
+    presence, transport, items = {}, "xmpp", []
+    sess = None
+    try:
+        sess = XmppSession(auth.d["account_id"], auth.access(), verbose=args.verbose)
+        sess.connect(); sess.auth(); sess.bind()
+        items = parse_roster(sess.roster())
+        presence = sess.presence_snapshot(args.wait)
+    except (WsError, OSError) as e:
+        detail = (f"; last exchange:\n  sent: {sess.last_sent[:200]}\n"
+                  f"  got:  {sess.last_recv[:200]}") \
+                 if sess and (sess.last_sent or sess.last_recv) else ""
+        warn(f"XMPP unavailable ({e}){detail}")
+        warn("falling back to the friends REST API (presence needs XMPP)")
+        try:
+            if args.verbose:
+                items, payload = friends_http(auth, raw=True)
+                print("REST payload:", json.dumps(payload)[:1500])
+            else:
+                items = friends_http(auth)
+            transport = "http"
+        except Exception as e2:
+            err(f"friends REST also failed: {e2}"); sys.exit(1)
+    finally:
+        if sess and sess.ws:
+            try: sess.ws.close()
+            except Exception: pass
+    if not items:
+        ok("no friends on the roster"); return
+    fids = [i["jid"].split("@")[0].split("/")[0] for i in items]
+    names = resolve_names(auth, fids)
+    print(f"{len(items)} friend(s)  [transport: {transport}]")
+    for it in items:
+        fid = it["jid"].split("@")[0].split("/")[0]
+        name = it.get("name") or names.get(fid) or fid
+        pres = next((p for k, p in presence.items()
+                     if k.split("@")[0].split("/")[0] == fid), None)
+        if pres and pres.get("type") != "unavailable":
+            state = C("32", pres.get("show") or "online")
+        else:
+            state = C("2", it.get("subscription") or "offline")
+        extra = f"  {pres['status'][:40]}" if pres and pres.get("status") else ""
+        print(f"  {name:<24} {state}{extra}")
+
+def cmd_list(args, auth):
+    for b in get_builds(auth):
+        live = C("32", " [LIVE]") if b.get("isLive") else ""
+        print(f"{b['version']}{live}\n    {human(b['fileSizeBytes'])}  released {b['releaseDate']}")
+
+def cmd_whoami(args, auth):
+    if not auth.logged_in: err("not logged in"); sys.exit(1)
+    r = jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"],
+              headers={"Authorization": "Bearer " + auth.access()})
+    print(f"{r.get('displayName')}  ({r.get('id')})")
+    print(f"email: {r.get('email','—')}")
+
+def cmd_config(args):
+    cfg = load_config()
+    if args.key and args.value is not None:
+        try:
+            val = parse_config_value(args.key, args.value)
+        except (RuntimeError, ValueError) as e:
+            err(str(e)); sys.exit(1)
+        cfg[args.key] = val
+        os.makedirs(os.path.dirname(config_path()), exist_ok=True)
+        with open(config_path(), "w") as f: json.dump(cfg, f, indent=1)
+        ok(f"{args.key} = {val}  ({config_path()})")
+    elif args.key:
+        print(f"{args.key} = {cfg.get(args.key, '(unset)')}")
+    else:
+        print(f"# {config_path()}")
+        for k, v in sorted(cfg.items()): print(f"{k} = {v}")
+
+def cmd_setup(args, auth):
+    hdrs = {"Authorization": "Bearer " + auth.access()}
+    if not args.name:
+        st = jhttp("GET", ACCOUNT + "/api/public/account/setup/status", headers=hdrs)
+        print(f"setup completed : {st.get('setupCompleted')}")
+        print(f"display name    : {auth.d.get('display_name') or '(none)'}")
+        print("set one with    : neo setup <name>")
+        return
+    avail = jhttp("GET", ACCOUNT + "/api/public/account/displayName/"
+                  + urllib.parse.quote(args.name, safe="") + "/available", headers=hdrs)
+    if not avail.get("available"):
+        err(f"'{args.name}' is not available — try another"); sys.exit(1)
+    status, raw = http("POST", ACCOUNT + "/api/public/account/setup",
+                       body=json.dumps({"displayName": args.name}).encode(),
+                       headers={**hdrs, "Content-Type": "application/json"})
+    if status >= 400:
+        err(f"setup failed: HTTP {status}: {raw[:200].decode('utf-8', 'replace')}"); sys.exit(1)
+    confirmed = json.loads(raw or b"{}").get("displayName", args.name)
+    auth.d["display_name"] = confirmed
+    auth.save()
+    ok(f"display name set: {confirmed}")
+
+# ---------------------------------------------------------------- main
+# One table drives both `neo help` and every subcommand's summary, so the two
+# can't drift apart (or from README → Usage). Group names come from the README.
+_COMMAND_GROUPS = ("account", "game", "system")
+_COMMANDS = {
+    "login":     ("account", "Discord login (browser; neolauncher:// handler)"),
+    "whoami":    ("account", "display name, account id and email"),
+    "setup":     ("account", "first-run display name"),
+    "logout":    ("account", "drop the stored session"),
+    "status":    ("account", "service status, bans, access and entitlements"),
+    "news":      ("account", "launcher news from the content service"),
+    "friends":   ("account", "friends roster + live presence (XMPP)"),
+    "list":      ("game", "every build in the catalog"),
+    "install":   ("game", "download and assemble a build"),
+    "import":    ("game", "register an existing build folder (no download)"),
+    "verify":    ("game", "re-hash installed files against the manifest"),
+    "uninstall": ("game", "remove an install"),
+    "launch":    ("game", "run the game through umu-run/Proton"),
+    "cache":     ("system", "chunk-cache size and cleanup"),
+    "log":       ("system", "show/tail the game's FortniteGame.log"),
+    "config":    ("system", "read/write settings"),
+    "help":      ("", "show this help — `neo help [command]`"),
+}
+
+
+class _NeoHelpFormatter(argparse.HelpFormatter):
+    """Compact, grouped help instead of argparse's sprawl."""
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        if prefix is None:
+            prefix = "usage: "
+        # The stock usage line lists the whole {login,…} choice set, which wraps
+        # on any real terminal; the command directory below is the real thing.
+        cmd = next((a for a in actions if not a.option_strings and a.dest == "cmd"), None)
+        if cmd is None:  # subcommand parsers keep the normal usage line
+            return super()._format_usage(usage, actions, groups, prefix)
+        return f"{prefix}{self._prog} <command> [options]\n\n"
+
+    def _format_action(self, action):
+        if isinstance(action, argparse._SubParsersAction):
+            return self._format_commands(action)
+        return super()._format_action(action)
+
+    def _format_commands(self, action):
+        subs = {s.dest: s for s in action._get_subactions()}
+        parts = []
+        for group in _COMMAND_GROUPS:
+            members = [name for name in _COMMANDS if _COMMANDS[name][0] == group]
+            if parts:
+                parts.append("\n")
+            parts.append(f"{' ' * self._current_indent}{group}\n")
+            for name in members:
+                parts.append(super()._format_action(subs[name]))
+        # the meta `help` command sits alone at the bottom, outside the groups
+        parts.append("\n")
+        parts.append(super()._format_action(subs["help"]))
+        return "".join(parts)
+
+
+class _NeoArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser whose subparsers inherit the tidy formatter."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", _NeoHelpFormatter)
+        super().__init__(*args, **kwargs)
+
+
+def make_parser():
+    p = _NeoArgumentParser(
+        prog="neo", description=f"NeoFN Linux launcher — v{VERSION}",
+        epilog="Run `neo <command> --help` (or `neo help <command>`) for a command's own options.")
+    p.add_argument("--version", action="version", version=VERSION)
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="command",
+                           title="commands", prog="neo")
+
+    def add(name, **kw):
+        _group, summary = _COMMANDS[name]
+        return sub.add_parser(name, help=summary, **kw)
+
+    s = add("login")
+    s.add_argument("--code", metavar="CODE", help="exchange the code directly (manual fallback)")
+    s.add_argument("--callback", metavar="URL", help="process a neolauncher://callback URL")
+    add("whoami")
+    s = add("setup"); s.add_argument("name", nargs="?", metavar="NAME",
+                                     help="display name to set (omit to see status)")
+    add("logout")
+    s = add("status")
+    s.add_argument("--watch", action="store_true",
+                   help="keep polling until fortniteAccess is granted, then notify and exit")
+    s.add_argument("--interval", type=int, default=60, metavar="SECS",
+                   help="poll period in seconds (min 10)")
+    s = add("news"); s.add_argument("--json", action="store_true",
+                                    help="dump the raw payload")
+    add("list")
+    s = add("config")
+    s.add_argument("key", nargs="?", metavar="KEY",
+                   help="setting to read or write (install_root, cache_dir, workers, proton, "
+                        "edit_on_release, instant_reset, disable_pre_edit, launch_options)")
+    s.add_argument("value", nargs="?", metavar="VALUE", help="value to store (omit to read)")
+    s = add("install")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to install — a substring like 10.40, or `live` (default)")
+    s.add_argument("-d", "--dir", metavar="DIR",
+                   help="install into DIR (default: the config install_root)")
+    s.add_argument("-j", "--jobs", type=int, metavar="N",
+                   help="download workers (default: the config workers)")
+    s.add_argument("--keep-cache", action="store_true",
+                   help="keep downloaded chunks after install (enables offline repair, uses ~build-size disk)")
+    s.add_argument("--force", action="store_true", help="skip the free-space preflight")
+    s = add("import")
+    s.add_argument("path", metavar="PATH",
+                   help="existing build root (contains FortniteGame/ and Engine/)")
+    s.add_argument("version", metavar="VER", help="catalog version of the build, e.g. 10.40")
+    s = add("verify")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to verify (default: newest installed)")
+    s.add_argument("--repair", action="store_true",
+                   help="re-fetch and rebuild only missing/corrupt files")
+    s = add("uninstall")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to remove (default: newest installed)")
+    s.add_argument("--yes", action="store_true", help="skip the removal prompt")
+    s = add("cache")
+    s.add_argument("action", nargs="?", choices=["stats", "clear"], metavar="{stats,clear}",
+                   help="what to do (default: stats)")
+    s.add_argument("--all", action="store_true", help="clear also cached manifests")
+    s = add("launch")
+    s.add_argument("version", nargs="?", metavar="VER",
+                   help="build to run (default: newest installed)")
+    s.add_argument("--dry-run", action="store_true", help="print the command line and stop")
+    s.add_argument("--proton", metavar="PROTON",
+                   help="Proton for this launch (overrides the config `proton` setting); "
+                        "umu receives it as PROTONPATH — a name like GE-Proton or a path")
+    s.add_argument("--edit-on-release", action=argparse.BooleanOptionalAction, default=None,
+                   help="confirm building edits when the edit button is released "
+                        "(official Options → Modifiers; persisted via neo config edit_on_release)")
+    s.add_argument("--instant-reset", action=argparse.BooleanOptionalAction, default=None,
+                   help="confirm a reset when the reset button is released "
+                        "(persisted via neo config instant_reset)")
+    s.add_argument("--disable-pre-edit", action=argparse.BooleanOptionalAction, default=None,
+                   help="skip the pre-edit highlight so edits apply without a confirm step "
+                        "(persisted via neo config disable_pre_edit)")
+    s.add_argument("extra", nargs=argparse.REMAINDER, metavar="args",
+                   help="extra UE4 arguments (-windowed, -log, …); put options before these")
+    s = add("friends")
+    s.add_argument("--wait", type=float, default=3.0, metavar="SECS",
+                   help="seconds to collect presence (default 3)")
+    s.add_argument("-v", "--verbose", action="store_true", help="print the raw XMPP exchange")
+    s = add("log")
+    s.add_argument("-f", "--follow", action="store_true", help="tail like tail -f")
+    s.add_argument("-p", "--path", metavar="PATH", help="explicit path to FortniteGame.log")
+    # `neo help` (same as `neo -h`), `neo help <cmd>` (same as `neo <cmd> -h`).
+    # `neo <cmd> help` is handled in main(), before parse_args, since "help"
+    # would otherwise be read as a positional value (e.g. `install`'s version).
+    h = add("help")
+    h.add_argument("topic", nargs="?", choices=list(sub.choices), metavar="command",
+                   help="command to show help for (default: the full help)")
+    # The commands group is created last; move it ahead of options so the
+    # directory reads before the two generic flags (the empty "positional
+    # arguments" group stays first and renders nothing).
+    p._action_groups.remove(p._subparsers)
+    p._action_groups.insert(1, p._subparsers)
+    p._subparsers_action = sub  # main() uses this for `neo <cmd> help`
+    return p
+
+def main():
+    p = make_parser()
+    sub = p._subparsers_action  # _SubParsersAction; name → parser in .choices
+    argv = sys.argv[1:]
+    # `neo <cmd> help` == `neo <cmd> --help`. Intercepted before parse_args
+    # because for commands with a positional (install, import, config, …),
+    # argparse would otherwise consume "help" as that positional's value and
+    # actually run the command.
+    if (len(argv) == 2 and argv[1] == "help"
+            and argv[0] in sub.choices and argv[0] != "help"):
+        sub.choices[argv[0]].print_help()
+        return
+    args = p.parse_args(argv)
+    if args.cmd == "help":
+        if args.topic:
+            sub.choices[args.topic].print_help()
+        else:
+            p.print_help()
+        return
+
+    auth = Auth()
+    if args.cmd == "login": return cmd_login(args)
+    if args.cmd == "logout": auth.logout(); return ok("logged out")
+    if args.cmd == "status": return cmd_status(args, auth)
+    if args.cmd == "news": return cmd_news(args)
+    if args.cmd == "list": return cmd_list(args, auth)
+    if args.cmd == "whoami": return cmd_whoami(args, auth)
+    if args.cmd == "setup": return cmd_setup(args, auth)
+    if args.cmd == "config": return cmd_config(args)
+    if args.cmd == "install": return cmd_install(args, auth)
+    if args.cmd == "import": return cmd_import(args, auth)
+    if args.cmd == "verify": return cmd_verify(args, auth)
+    if args.cmd == "uninstall": return cmd_uninstall(args)
+    if args.cmd == "cache": return cmd_cache(args)
+    if args.cmd == "launch": return cmd_launch(args, auth)
+    if args.cmd == "friends": return cmd_friends(args, auth)
+    if args.cmd == "log": return cmd_log(args)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        # downloads write atomically (tmp+rename) — hard exit is safe and avoids
+        # waiting on stuck worker threads at interpreter shutdown
+        print("\ninterrupted — progress is kept; re-run the same command to resume")
+        os._exit(130)
+    except RuntimeError as e:
+        err(str(e)); sys.exit(1)

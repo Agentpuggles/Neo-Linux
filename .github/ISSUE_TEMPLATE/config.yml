@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the troubleshooting table first
+    url: https://github.com/Agentpuggles/Neo-Linux/blob/main/README.md#troubleshooting
+    about: Login callbacks, CDN 403/404s, the in-game email/password screen and -basedir failures are already documented with fixes.
+  - name: Wire protocol reference
+    url: https://github.com/Agentpuggles/Neo-Linux/blob/main/docs/protocol.md
+    about: Endpoints, auth quirks, manifest encodings, chunk layout and the launch recipe — read this before reporting "the API changed".
+  - name: Report a security problem privately
+    url: https://github.com/Agentpuggles/Neo-Linux/security/advisories/new
+    about: Token storage, path traversal, verification bypasses — please never open a public issue for these.
+  - name: umu-launcher (the piece that actually runs the game)
+    url: https://github.com/Open-Wine-Components/umu-launcher/issues
+    about: Proton/Wine prefix problems, DXVK behaviour and launch-time crashes belong upstream.

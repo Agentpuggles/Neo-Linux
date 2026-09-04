@@ -1,0 +1,28 @@
+# Byte-compiled / caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local dev environments
+.venv/
+venv/
+
+# Scratch output from testing the launcher by hand
+NEO_HOME/
+*.log
+neo-install-*/
+
+# Editor and OS droppings
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Nothing in this repo is built, so anything that looks like a build artifact is a
+# mistake — including copies of the launcher or downloaded game data.
+dist/
+build/
+*.egg-info/
+CloudDir/
+*.chunk
