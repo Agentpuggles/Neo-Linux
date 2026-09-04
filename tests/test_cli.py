@@ -137,6 +137,9 @@ class TestInvocation(CliTestCase):
         text = support.run_cli("launch", "--help")
         self.assertIn("--dry-run", text)
         self.assertIn("--proton", text)
+        self.assertIn("--edit-on-release", text)
+        self.assertIn("--instant-reset", text)
+        self.assertIn("--disable-pre-edit", text)
 
     def test_unknown_command_exits_2(self):
         support.run_cli("frobnicate", expect_rc=2)
@@ -205,6 +208,18 @@ class TestConfigCommand(CliTestCase):
     def test_settings_survive_a_second_invocation(self):
         support.run_cli("config", "cache_dir", str(self.home / "bulk"))
         self.assertIn(str(self.home / "bulk"), support.run_cli("config"))
+
+    def test_bool_modifier_keys_are_stored_as_bools(self):
+        self.assertIn("edit_on_release = True",
+                      support.run_cli("config", "edit_on_release", "on"))
+        self.assertIs(self.read_config()["edit_on_release"], True)
+        support.run_cli("config", "instant_reset", "false")
+        self.assertIs(self.read_config()["instant_reset"], False)
+
+    def test_bool_modifier_keys_reject_junk(self):
+        text = support.run_cli("config", "disable_pre_edit", "maybe", expect_rc=1)
+        self.assertIn("true/false", text)
+        self.assertNotIn("Traceback", text)
 
 
 class TestLaunchArgumentForwarding(CliTestCase):
@@ -469,6 +484,13 @@ class TestLaunchArgVector(CliTestCase):
                                       "-fltoken=tok123"])
         self.assertEqual(argv[12:], ["-windowed"])
 
+    def test_all_false_modifiers_keep_the_twelve_flag_vector(self):
+        argv = neo.game_argv("C:\\\\g\\\\Win64", "CODE1", "CODE2", "tok123", modifiers={
+            "editOnRelease": False, "instantReset": False, "disablePreEdit": False,
+        })
+        self.assertEqual(len(argv), 12)
+        self.assertTrue(all(not a.startswith("-NeoModifiers=") for a in argv))
+
     def test_module_constants_agree_with_the_golden_copy(self):
         self.assertEqual(list(neo.OFFICIAL_ARGS), list(self.DLL_FLAGS))
 
@@ -479,6 +501,69 @@ class TestLaunchArgVector(CliTestCase):
         self.assertEqual(len(token), 24)
         self.assertTrue(set(token) <= set(string.ascii_lowercase + string.digits))
         self.assertNotEqual(token, neo.fl_token())
+
+
+class TestGameModifiers(CliTestCase):
+    """Official Options → Modifiers, read out of EncodeGameModifiers + the web UI.
+
+    The host concatenates `-NeoModifiers=` with the JSON object's GetRawText()
+    (compact, camelCase, all four keys). We omit the all-false form so the
+    default argv stays the 12-flag vector that was live-validated.
+    """
+
+    ENABLED = (
+        "-NeoModifiers="
+        '{"editOnRelease":true,"instantReset":false,'
+        '"disablePreEdit":false,"bubblePerformance":false}'
+    )
+
+    def test_encode_matches_the_webview_payload(self):
+        encoded = neo.encode_game_modifiers({"editOnRelease": True})
+        self.assertEqual(encoded, self.ENABLED)
+
+    def test_encode_skips_the_noop_form(self):
+        self.assertIsNone(neo.encode_game_modifiers({}))
+        self.assertIsNone(neo.encode_game_modifiers(None))
+        self.assertIsNone(neo.encode_game_modifiers({
+            "editOnRelease": False, "instantReset": False, "disablePreEdit": False,
+            "bubblePerformance": True,  # locked in the official UI; we never emit it
+        }))
+
+    def test_modifiers_append_after_fltoken_before_extras(self):
+        argv = neo.game_argv("C:\\\\g\\\\Win64", "CODE1", "CODE2", "tok123",
+                             extra=["-windowed"],
+                             modifiers={"editOnRelease": True})
+        self.assertEqual(argv[11], "-fltoken=tok123")
+        self.assertEqual(argv[12], self.ENABLED)
+        self.assertEqual(argv[13], "-windowed")
+
+    def test_config_feeds_resolve_modifiers_and_cli_overrides(self):
+        import argparse
+
+        support.run_cli("config", "edit_on_release", "true")
+        support.run_cli("config", "instant_reset", "on")
+        args = argparse.Namespace(edit_on_release=None, instant_reset=False,
+                                  disable_pre_edit=None)
+        mods = neo.resolve_modifiers(args)
+        self.assertTrue(mods["editOnRelease"])
+        self.assertFalse(mods["instantReset"])  # --no-instant-reset
+        self.assertFalse(mods["disablePreEdit"])
+
+    def test_launch_options_are_split_and_prepended_to_extras(self):
+        import argparse
+
+        support.run_cli("config", "launch_options", "-windowed -log")
+        args = argparse.Namespace(extra=["--", "-nosplash"])
+        self.assertEqual(neo.resolve_launch_options(args),
+                         ["-windowed", "-log", "-nosplash"])
+
+    def test_boolean_optional_flags_parse(self):
+        on = neo.make_parser().parse_args(["launch", "--edit-on-release", "--instant-reset"])
+        self.assertTrue(on.edit_on_release)
+        self.assertTrue(on.instant_reset)
+        self.assertIsNone(on.disable_pre_edit)
+        off = neo.make_parser().parse_args(["launch", "--no-edit-on-release"])
+        self.assertFalse(off.edit_on_release)
 
 
 class TestWineAbortHint(unittest.TestCase):
