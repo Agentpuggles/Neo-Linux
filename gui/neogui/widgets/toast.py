@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
 )
+from PySide6.QtGui import QRegion
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -165,16 +166,36 @@ class Toast(QFrame):
 
 
 class ToastHost(QWidget):
-    """Transparent overlay pinned to the bottom-right of the window."""
+    """Transparent overlay pinned to the bottom-right of the window.
+
+    The host is stretched over the *whole* window so toasts can be positioned
+    freely, which makes it the topmost child everywhere — including on top of
+    every button in the app. Mouse input has to be handled deliberately:
+
+      * `WA_TransparentForMouseEvents` on the host is not usable, because Qt
+        propagates it to children during hit-testing, so the toasts' own
+        Details/Dismiss buttons would stop working too.
+      * Instead the host carries a *mask* covering only the rectangles the
+        toasts actually occupy. Clicks inside a toast reach the toast; clicks
+        anywhere else fall straight through to the UI underneath.
+
+    `reflow()` is the single place that repositions toasts, so it is also the
+    single place that keeps the mask in sync.
+    """
 
     MAX = 4
+
+    # A mask that is empty is treated by Qt as "no mask at all" (the widget
+    # goes back to swallowing everything), so "click-through everywhere" has to
+    # be expressed as a one-pixel region outside the widget instead.
+    _NO_INPUT = QRegion(-1, -1, 1, 1)
 
     def __init__(self, theme: Theme, parent=None) -> None:
         super().__init__(parent)
         self._theme = theme
         self._toasts: list = []
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setMask(self._NO_INPUT)
 
     def show_toast(self, text: str, tone: str = "info", **kwargs) -> Toast:
         while len(self._toasts) >= self.MAX:
@@ -222,6 +243,19 @@ class ToastHost(QWidget):
             y -= h
             toast.setGeometry(self.width() - w - margin, y, w, h)
             y -= SPACE["sm"]
+        self._sync_mask()
+
+    def _sync_mask(self) -> None:
+        """Accept mouse input only where a toast is actually drawn.
+
+        Without this the overlay covers the window and eats every click meant
+        for the app underneath it.
+        """
+        region = QRegion()
+        for toast in self._toasts:
+            if toast.isVisible() or not toast.isHidden():
+                region = region.united(QRegion(toast.geometry()))
+        self.setMask(region if not region.isEmpty() else self._NO_INPUT)
 
     def resizeEvent(self, event):
         self.reflow()

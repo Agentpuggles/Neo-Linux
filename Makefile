@@ -5,10 +5,19 @@ PYTHON ?= python3
 RUFF   ?= ruff
 PREFIX ?= $(HOME)/.local
 
+# The CLI is stdlib-only and deliberately runs on the system interpreter, so
+# $(PYTHON) stays as-is. The desktop app needs PySide6, which `make dev-gui`
+# installs into .venv — so the GUI targets prefer that interpreter when it
+# exists and fall back to $(PYTHON) otherwise (a distro-packaged PySide6, or
+# an already-activated virtualenv). Override with `make run-gui GUI_PYTHON=...`.
+VENV_PYTHON := $(CURDIR)/.venv/bin/python
+GUI_PYTHON  ?= $(if $(wildcard $(VENV_PYTHON)),$(VENV_PYTHON),$(PYTHON))
+
 .DEFAULT_GOAL := help
 
-.PHONY: help check lint lint-fix format test test-gui smoke smoke-gui dev dev-gui \
-	install install-gui install-all uninstall uninstall-all clean run-gui
+.PHONY: help check check-gui lint lint-fix format test test-gui smoke smoke-gui \
+	dev dev-gui gui-python-check install install-gui install-all uninstall \
+	uninstall-all clean run-gui
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -33,8 +42,8 @@ test:  ## Offline unit tests for the CLI and the GUI backend (no Qt required)
 	$(PYTHON) -m unittest discover -s tests -t . -v -p 'test_[a-fh-z]*.py'
 	$(PYTHON) -m unittest tests.test_gui_backend -v
 
-test-gui:  ## Qt tests, driven offscreen (needs PySide6; no display server; ~8 min)
-	QT_QPA_PLATFORM=offscreen $(PYTHON) -m unittest tests.test_gui_widgets -v
+test-gui: gui-python-check  ## Qt tests, driven offscreen (needs PySide6; ~8 min)
+	QT_QPA_PLATFORM=offscreen $(GUI_PYTHON) -m unittest tests.test_gui_widgets -v
 
 smoke:  ## Byte-compile and run the CLI the way a user would
 	$(PYTHON) -m py_compile neo
@@ -44,9 +53,9 @@ smoke:  ## Byte-compile and run the CLI the way a user would
 	done
 	@echo "smoke: ok"
 
-smoke-gui:  ## Import the desktop app and open every page once, headless
-	$(PYTHON) -m py_compile gui/neo-gui
-	QT_QPA_PLATFORM=offscreen $(PYTHON) gui/neo-gui --self-check
+smoke-gui: gui-python-check  ## Import the desktop app and open every page once, headless
+	$(GUI_PYTHON) -m py_compile gui/neo-gui
+	QT_QPA_PLATFORM=offscreen $(GUI_PYTHON) gui/neo-gui --self-check
 
 dev:  ## Install the one dev dependency (ruff) into a venv
 	$(PYTHON) -m venv .venv
@@ -55,9 +64,18 @@ dev:  ## Install the one dev dependency (ruff) into a venv
 
 dev-gui: dev  ## Same, plus PySide6 so you can run the desktop app
 	.venv/bin/pip install --upgrade PySide6
+	@echo "the GUI targets (run-gui, test-gui, smoke-gui) now use .venv automatically"
 
-run-gui:  ## Run the desktop app from the checkout
-	NEO_BIN=$(CURDIR)/neo $(PYTHON) gui/neo-gui
+run-gui: gui-python-check  ## Run the desktop app from the checkout
+	NEO_BIN=$(CURDIR)/neo $(GUI_PYTHON) gui/neo-gui
+
+# Fail with an instruction rather than a ModuleNotFoundError traceback.
+gui-python-check:
+	@$(GUI_PYTHON) -c 'import PySide6' 2>/dev/null || { \
+		echo "PySide6 not found for $(GUI_PYTHON)."; \
+		echo "Run 'make dev-gui' to create .venv with PySide6, or install your"; \
+		echo "distro's package (e.g. pacman -S pyside6), or set GUI_PYTHON=..."; \
+		exit 1; }
 
 install:  ## Install the CLI into $(PREFIX)/bin
 	install -Dm755 neo $(DESTDIR)$(PREFIX)/bin/neo

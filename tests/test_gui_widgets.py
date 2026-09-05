@@ -603,6 +603,139 @@ class TestBackgroundJobs(WindowTestCase):
         self.assertFalse(self.window._reject_if_busy())
 
 
+class TestMouseAndKeyboardInput(WindowTestCase):
+    """Regressions for the overlay-eats-clicks and Enter-does-nothing bugs.
+
+    Both were invisible to a screenshot and to `--self-check`: the window
+    rendered perfectly, it just ignored the mouse. These assert on hit-testing
+    and on real synthesized events instead of on appearance.
+    """
+
+    def _root(self):
+        return self.window.centralWidget()
+
+    def test_buttons_are_not_covered_by_the_toast_overlay(self):
+        """The overlay spans the window; it must not win hit-testing."""
+        root = self._root()
+        self.window.show()
+        _app.processEvents()
+        _app.sendPostedEvents()
+        _app.processEvents()
+
+        play = self.window.views["play"]
+        for name, widget in (
+            ("the hero PLAY button", play.hero.play_btn),
+            ("a nav rail button", self.window.rail.buttons["library"]),
+        ):
+            centre = widget.mapTo(root, widget.rect().center())
+            self.assertIs(
+                root.childAt(centre),
+                widget,
+                f"{name} is covered by {type(root.childAt(centre)).__name__}",
+            )
+
+    def test_a_mouse_click_actually_activates_a_button(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QMouseEvent
+
+        self.window.show()
+        _app.processEvents()
+        button = self.window.rail.buttons["library"]
+        fired = []
+        button.clicked.connect(lambda: fired.append(1))
+
+        local = button.rect().center()
+        glob = button.mapToGlobal(local)
+        for kind in (
+            QMouseEvent.Type.MouseButtonPress,
+            QMouseEvent.Type.MouseButtonRelease,
+        ):
+            _app.sendEvent(
+                button,
+                QMouseEvent(
+                    kind,
+                    local,
+                    glob,
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                ),
+            )
+        _app.processEvents()
+        self.assertTrue(fired, "clicking a nav button did nothing")
+        self.assertIs(self.window.stack.currentWidget(), self.window.views["library"])
+
+    def test_enter_and_space_both_activate_a_focused_button(self):
+        """Outside a QDialog, Qt leaves autoDefault off and Enter is inert."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+
+        from neogui.widgets.common import Button
+
+        self.window.show()
+        _app.processEvents()
+        button = Button("probe", self.window.theme, parent=self.window.views["play"])
+        button.show()
+        button.setFocus()
+        _app.processEvents()
+
+        fired = []
+        button.clicked.connect(lambda: fired.append(1))
+        for key, name in (
+            (Qt.Key.Key_Return, "Return"),
+            (Qt.Key.Key_Enter, "Enter (keypad)"),
+            (Qt.Key.Key_Space, "Space"),
+        ):
+            fired.clear()
+            for kind in (QKeyEvent.Type.KeyPress, QKeyEvent.Type.KeyRelease):
+                _app.sendEvent(
+                    button, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier)
+                )
+            _app.processEvents()
+            self.assertTrue(fired, f"{name} did not activate the focused button")
+
+    def test_a_visible_toast_is_still_clickable(self):
+        """The overlay must accept input where a toast actually is."""
+        self.window.show()
+        _app.processEvents()
+        toast = self.window.toasts.show_toast("hello", "info", detail="detail")
+        _app.processEvents()
+        self.window.toasts.reflow()
+        _app.processEvents()
+
+        root = self._root()
+        centre = toast.close_btn.mapTo(root, toast.close_btn.rect().center())
+        self.assertIs(
+            root.childAt(centre),
+            toast.close_btn,
+            "the toast's own Dismiss button is not reachable",
+        )
+
+    def test_the_app_stays_clickable_while_a_toast_is_showing(self):
+        self.window.show()
+        _app.processEvents()
+        self.window.toasts.show_toast("hello", "info")
+        _app.processEvents()
+        self.window.toasts.reflow()
+        _app.processEvents()
+
+        root = self._root()
+        button = self.window.rail.buttons["settings"]
+        centre = button.mapTo(root, button.rect().center())
+        self.assertIs(root.childAt(centre), button)
+
+    def test_dialog_buttons_keep_their_deliberate_default_behaviour(self):
+        """Making buttons autoDefault must not make a destructive one the default."""
+        from neogui.widgets.dialogs import ConfirmDialog
+
+        dialog = ConfirmDialog(
+            self.window.ctx, title="Remove?", body="body", destructive=True
+        )
+        self.assertFalse(dialog.confirm.isDefault())
+        self.assertFalse(dialog.confirm.autoDefault())
+        dialog.reject()
+
+
 class TestAccessibility(WindowTestCase):
     def test_interactive_controls_carry_accessible_names(self):
         """Screen readers need a name on anything clickable."""

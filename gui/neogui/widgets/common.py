@@ -168,6 +168,7 @@ class IconButton(QPushButton):
         self.setAccessibleName(tooltip or name)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAutoDefault(True)  # see Button: Enter must work outside dialogs too
         self.retheme()
         theme.changed.connect(self.retheme)
 
@@ -209,6 +210,10 @@ class Button(QPushButton):
         self._variant = variant
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # QPushButton only enables autoDefault inside a QDialog, so in the main
+        # window Enter on a focused button did nothing while Space worked. Users
+        # (and screen-reader users especially) expect both.
+        self.setAutoDefault(True)
         if tooltip:
             self.setToolTip(tooltip)
         self.setAccessibleName(text or tooltip)

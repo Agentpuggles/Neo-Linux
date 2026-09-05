@@ -38,6 +38,7 @@ class NavButton(QPushButton):
         self.setObjectName("NavButton")
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAutoDefault(True)  # Enter activates a focused rail item, as Space does
         self.setIconSize(QSize(19, 19))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(38)
