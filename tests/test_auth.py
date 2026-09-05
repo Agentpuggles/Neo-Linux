@@ -195,10 +195,6 @@ class TestExchangeCodes(AuthTestCase):
                 self.assertEqual(auth.exchange_code(), ("EXC", 30))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestStoreEntitlements(AuthTestCase):
     """The store endpoint and its summary line — docs/protocol.md §11.3."""
 
@@ -231,4 +227,107 @@ class TestStoreEntitlements(AuthTestCase):
 
     def test_summary_of_an_empty_account_and_of_garbage(self):
         self.assertEqual(neo.describe_entitlements({}), "none on file")
-        self.assertEqual(neo.describe_entitlements(["x"]), "['x']")
+        self.assertEqual(neo.describe_entitlements([]), "none on file")
+        self.assertEqual(neo.describe_entitlements("boom"), "boom")
+
+    def test_summary_reads_a_bare_array_and_a_wrapped_payload(self):
+        # shapes seen in the wild beside the documented one — a summary that
+        # said "none on file" for either would be a lie about the account
+        self.assertEqual(
+            neo.describe_entitlements([{"offerId": "5"}, {"id": "7"}]),
+            "2 entitlement(s): 5, 7",
+        )
+        self.assertEqual(
+            neo.describe_entitlements({"data": {"ownedOfferIds": ["5"]}}),
+            "offers 5",
+        )
+        self.assertEqual(neo.describe_entitlements(["x"]), "1 entitlement(s)")
+
+    def test_an_unrecognised_non_empty_payload_says_so(self):
+        # "none on file" must only ever mean the server said the account owns
+        # nothing — never "we could not read this"
+        self.assertEqual(
+            neo.describe_entitlements({"tier": "supporter", "since": "2026"}),
+            "unrecognised payload (keys: since, tier)",
+        )
+
+    def test_snake_case_offers_are_read_too(self):
+        self.assertEqual(
+            neo.describe_entitlements({"owned_offer_ids": ["5"]}), "offers 5"
+        )
+
+
+class TestPlayAccessGate(AuthTestCase):
+    """The per-account gate is tri-state since the public launch — §11.2."""
+
+    def gate(self, outcome):
+        def fake(method, url, body=None, headers=None, timeout=60):
+            self.calls.append({"method": method, "url": url})
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        patcher = mock.patch.object(neo, "jhttp", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        auth = neo.Auth()
+        auth.d = dict(TOKEN)
+        return neo.fortnite_access_state(auth)
+
+    def test_true_is_granted_and_false_is_denied(self):
+        self.assertEqual(self.gate(True), (neo.ACCESS_GRANTED, True))
+        self.assertEqual(self.gate(False), (neo.ACCESS_DENIED, False))
+
+    def test_a_404_is_an_open_gate_not_a_denial(self):
+        # after launch the account service stopped publishing the gate; a 404
+        # means nothing is gating this account, so it must not read as denied
+        state, payload = self.gate(
+            neo.HttpError("GET", "https://example/fortniteAccess", 404, b"")
+        )
+        self.assertEqual(state, neo.ACCESS_OPEN)
+        self.assertIsNone(payload)
+        self.assertTrue(neo.playable_access(state))
+
+    def test_other_http_failures_still_propagate(self):
+        with self.assertRaises(neo.HttpError):
+            self.gate(neo.HttpError("GET", "https://example/fortniteAccess", 401, b""))
+
+    def test_only_an_explicit_denial_blocks_play(self):
+        self.assertTrue(neo.playable_access(neo.ACCESS_GRANTED))
+        self.assertTrue(neo.playable_access(neo.ACCESS_OPEN))
+        self.assertFalse(neo.playable_access(neo.ACCESS_DENIED))
+        self.assertFalse(neo.playable_access(neo.ACCESS_UNKNOWN))
+
+
+class TestHttpErrors(AuthTestCase):
+    """`jhttp` keeps the status on the exception so callers can branch on it."""
+
+    def test_status_is_available_and_the_message_is_unchanged(self):
+        self.stub_http((404, b"nope"))
+        with self.assertRaises(neo.HttpError) as caught:
+            neo.jhttp("GET", "https://example/thing")
+        self.assertEqual(caught.exception.status, 404)
+        self.assertEqual(
+            str(caught.exception), "GET https://example/thing -> HTTP 404: nope"
+        )
+        self.assertEqual(neo.http_status(caught.exception), 404)
+
+    def test_status_can_be_recovered_from_a_plain_runtime_error(self):
+        self.assertEqual(
+            neo.http_status(RuntimeError("GET https://x -> HTTP 503: down")), 503
+        )
+        self.assertIsNone(neo.http_status(RuntimeError("no status here")))
+
+
+class TestOnlineCount(unittest.TestCase):
+    def test_the_per_service_map_renders_as_a_line(self):
+        self.assertEqual(
+            neo.format_online_count({"fortnite": 240, "launcher": 402}),
+            "fortnite 240 · launcher 402 (total 642)",
+        )
+        self.assertEqual(neo.format_online_count({"fortnite": 1200}), "fortnite 1,200")
+        self.assertEqual(neo.format_online_count(7), "7")
+
+
+if __name__ == "__main__":
+    unittest.main()

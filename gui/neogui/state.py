@@ -115,10 +115,10 @@ class AppState(QObject):
         )
 
     def _set_status(self, status: ServiceStatus) -> None:
-        was_granted = self.status.fortnite_access
+        was_denied = self.status.access_denied
         self.status = status
         self.status_changed.emit(status)
-        if status.fortnite_access and was_granted is False:
+        if status.access_ok and was_denied:
             self.notice.emit("success", "Game access granted — you can launch now.")
             self.log_activity("Account access granted")
 

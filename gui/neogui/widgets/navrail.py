@@ -158,12 +158,15 @@ class NavRail(QFrame):
         elif status.banned or status.prism_banned:
             self.chip_dot.set_tone("danger")
             self.chip_state.setText("Account banned")
-        elif status.fortnite_access:
+        elif status.access_ok:
             self.chip_dot.set_tone("success")
             self.chip_state.setText("Ready to play")
-        elif status.reachable:
+        elif status.access_denied:
             self.chip_dot.set_tone("warning")
             self.chip_state.setText("No game access")
+        elif status.reachable:
+            self.chip_dot.set_tone("success")
+            self.chip_state.setText("Signed in")
         else:
             self.chip_dot.set_tone("muted")
             self.chip_state.setText("Offline")

@@ -184,16 +184,15 @@ class PlayView(View):
 
         if not self.state.session.logged_in:
             self.stat_access.set("—", "muted", "Sign in to check")
-        elif status.fortnite_access is True:
-            self.stat_access.set("Granted", "success", status.entitlements)
-        elif status.fortnite_access is False:
-            self.stat_access.set(
-                "Not granted",
-                "warning",
-                "NeoFN has not enabled play for this account yet.",
-            )
-        else:
+        elif status.access_gate == "unknown":
             self.stat_access.set("Unknown", "muted", "Could not check right now")
+        else:
+            self.stat_access.set(
+                status.access_label,
+                status.access_tone,
+                (status.entitlements if status.access_gate == "granted" else "")
+                or status.access_note,
+            )
         self._sync_hero()
 
     def _on_installs(self, installs: list) -> None:
@@ -318,7 +317,7 @@ class PlayView(View):
                 self.hero.set_state("BANNED", "danger")
             elif status.reachable and not status.up:
                 self.hero.set_state(status.status.upper()[:12], "warning")
-            elif status.fortnite_access is False:
+            elif status.access_denied:
                 self.hero.set_state("NO ACCESS", "warning")
                 detail = "Your account does not have play access yet."
             else:
