@@ -72,6 +72,22 @@ def environment(**values):
                 os.environ[key] = value
 
 
+def scratch_home():
+    """Point NEO_HOME / NEO_CACHE / XDG_CONFIG_HOME at a fresh directory.
+
+    Used by the GUI backend tests, which need a clean state.json and config per
+    test rather than the module-wide sandbox. The directory is inside SANDBOX,
+    so it is cleaned up with everything else at exit.
+    """
+    root = pathlib.Path(tempfile.mkdtemp(prefix="neo-case-", dir=str(SANDBOX)))
+    os.environ["NEO_HOME"] = str(root / "share")
+    os.environ["NEO_CACHE"] = str(root / "cache")
+    os.environ["XDG_CONFIG_HOME"] = str(root / "config")
+    for sub in ("share", "cache", "config"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    return str(root)
+
+
 @contextlib.contextmanager
 def temp_dir():
     """A scratch directory, removed afterwards."""

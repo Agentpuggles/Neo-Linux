@@ -38,6 +38,7 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 | [Install](#install) | clone + one `install` command |
 | [Quick start](#quick-start) | first run to playing, six commands |
 | [Usage](#usage) | every command, flag by flag |
+| [Desktop app](#desktop-app) | the graphical launcher: install, features, packaging |
 | [Configuration](#configuration) | paths, settings, environment, disk usage |
 | [How it works](#how-it-works) | the pipeline, and where the protocol is documented |
 | [Repository layout](#repository-layout) | what lives where |
@@ -267,10 +268,74 @@ cache or the network. What it cannot do is prove a live install works — `neo i
 `neo verify` and `neo launch --dry-run` on real hardware stay part of the pre-release
 checklist in [CONTRIBUTING.md](CONTRIBUTING.md#testing).
 
+## Desktop app
+
+Everything above is the command line. There is also **Neo**, a native desktop app
+built on the same code — the CLI is not shelled out to or reimplemented, it is
+imported, so a fix in one is a fix in both.
+
+![Neo desktop app](docs/assets/neo-gui.png)
+
+It is a real Qt application: a proper window with menus and dialogs, an app-menu
+entry and icon, dock/taskbar integration, desktop notifications, a tray icon, and
+`neolauncher://` sign-in handling. Dark and light themes follow your desktop's
+preference. It makes no assumptions about your desktop environment — the same
+build runs on KDE, GNOME, XFCE, Cinnamon, Hyprland, Sway and COSMIC, under both
+Wayland and X11.
+
+**Requirements:** Python 3.9+ and PySide6. The CLI stays stdlib-only; Qt is
+needed only if you want the desktop app.
+
+```sh
+# Arch / CachyOS
+sudo pacman -S pyside6
+# Fedora
+sudo dnf install python3-pyside6
+# Debian / Ubuntu / Mint
+sudo apt install python3-pyside6.qtwidgets
+# openSUSE
+sudo zypper install python3-pyside6
+# anything else
+pip install --user PySide6
+```
+
+```sh
+make install-all          # CLI + desktop app + .desktop entry + icon
+neo-gui                   # or launch "Neo" from your application menu
+```
+
+Run it straight from a checkout with `make run-gui`. To add the menu entry
+without installing system-wide: `neo-gui --install-desktop-entry`.
+
+| Page | What it does |
+| --- | --- |
+| **Play** | Status at a glance, the build you last used, and one button that installs, signs in or launches — whichever you actually need next. Live download and verify progress, recent activity, service news. |
+| **Library** | Every build you have installed and everything NeoFN publishes. Install, import an existing folder, verify, repair, remove. Per-build launch arguments, Proton build and prefix, and the gameplay modifiers. |
+| **Friends** | Your roster over XMPP, with a REST fallback when the socket is unavailable. |
+| **Diagnostics** | Neo's log, the game's log with follow-tail, your environment, and a one-click report that is redacted before it leaves the app. |
+| **Settings** | General, Appearance, Game, Launch, Network, Desktop integration and Advanced — the last hidden until you ask for it. |
+| **Account** | Sign in and out, session details, entitlements, display name. |
+
+Settings are the same `config.json` the CLI reads, so changing your install root
+or Proton build in either place changes it in both.
+
+**Security.** Tokens are never written by the GUI — the CLI's `auth.json` (mode
+`0600`) remains the only store. Nothing is executed through a shell: launch
+arguments are parsed with `shlex` and passed as an argument vector. Every log
+pane, saved log and diagnostics report is passed through a redactor first, and
+the launch-command preview masks exchange codes. There is no bundled browser
+engine and no telemetry.
+
+**Packaging.** `packaging/` has a `PKGBUILD` for the AUR, a Flatpak
+manifest, a `build-appimage.sh` for a portable build, and the freedesktop
+`.desktop`, icon and AppStream metainfo files that distro packages need.
+`make install-all` honours `DESTDIR` and `PREFIX`.
+
 ## Documentation
 
 | Document | What's in it |
 | --- | --- |
+| [docs/gui-architecture.md](docs/gui-architecture.md) | How the desktop app is put together: why Qt Widgets, the layer boundaries, how it reuses the CLI without duplicating it, and the degradation and security rules it follows. |
 | [docs/protocol.md](docs/protocol.md) | The wire protocol: endpoints, auth quirks, manifest format, chunk URLs and file layout, prism, the launch recipe. Validated live against production. |
 | [docs/engineering-notes.md](docs/engineering-notes.md) | Every significant bug and dead end from building this, with the diagnosis that resolved it — including the ones that were our own fault. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and known issues. |

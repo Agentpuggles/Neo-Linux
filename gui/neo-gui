@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Launcher script for the Neo desktop client.
+
+This one file has to work from three different layouts:
+
+  * a git checkout, where the package sits next to this script in `gui/`;
+  * a system install, where the script lands in `<prefix>/bin` and the package
+    in `<prefix>/share/neo`;
+  * a bundle (AppImage/Flatpak), where NEO_GUI_ROOT points at the package.
+
+So rather than assuming any one of them, look for `neogui/app.py` in each
+candidate location and use the first that exists.
+"""
+import os
+import sys
+
+
+def _package_root():
+    here = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
+    prefix = os.path.dirname(here)  # <prefix>/bin/neo-gui -> <prefix>
+    candidates = [
+        os.environ.get("NEO_GUI_ROOT"),
+        here,                                          # checkout: gui/neogui
+        os.path.join(prefix, "share", "neo"),          # make install-all
+        os.path.join(prefix, "lib", "neo"),            # distro packages
+        "/usr/share/neo",
+        "/usr/local/share/neo",
+        "/app/share/neo",                              # flatpak
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(os.path.join(candidate, "neogui", "app.py")):
+            return candidate
+    return here
+
+
+sys.path.insert(0, _package_root())
+
+try:
+    from neogui.app import main
+except ImportError as exc:  # pragma: no cover - install problem, not a code path
+    if "PySide6" in str(exc):
+        sys.exit(
+            "Neo's desktop app needs PySide6.\n\n"
+            "  Arch/CachyOS   sudo pacman -S pyside6\n"
+            "  Fedora         sudo dnf install python3-pyside6\n"
+            "  Debian/Ubuntu  sudo apt install python3-pyside6.qtwidgets\n"
+            "  openSUSE       sudo zypper install python3-pyside6\n"
+            "  anything else  pip install --user PySide6\n\n"
+            "The `neo` command-line launcher works without it."
+        )
+    sys.exit(f"Neo's desktop app could not start: {exc}")
+
+if __name__ == "__main__":
+    sys.exit(main())

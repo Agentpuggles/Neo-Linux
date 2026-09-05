@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.neofn.NeoLauncher</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Neo</name>
+  <summary>Launch and manage NeoFN builds on Linux</summary>
+  <description>
+    <p>
+      Neo is a native Linux launcher for NeoFN. It downloads and verifies game
+      builds, manages Proton prefixes and launch options, signs you in, and
+      starts the game — with readable progress and readable errors.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Install, import, verify and repair builds</li>
+      <li>Per-build launch arguments, Proton build and prefix</li>
+      <li>Account sign-in with no plaintext credential storage</li>
+      <li>Logs and a redacted diagnostics report you can share safely</li>
+      <li>Dark and light themes that follow your desktop</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dev.neofn.NeoLauncher.desktop</launchable>
+  <categories>
+    <category>Game</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <url type="homepage">https://github.com/Agentpuggles/Neo-Linux</url>
+  <url type="bugtracker">https://github.com/Agentpuggles/Neo-Linux/issues</url>
+  <provides>
+    <binary>neo</binary>
+    <binary>neo-gui</binary>
+  </provides>
+  <releases>
+    <release version="1.0.0" date="2026-09-04">
+      <description><p>First release of the desktop app.</p></description>
+    </release>
+  </releases>
+</component>
