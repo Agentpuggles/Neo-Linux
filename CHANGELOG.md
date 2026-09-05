@@ -11,10 +11,42 @@ All notable changes to `neo` are documented here, newest first. The format follo
 
 ## [Unreleased]
 
-Repository hygiene and a test suite, plus a self-diagnosing launch failure. Validated
-with `make check` (ruff + the offline suite + CLI smoke).
+Repository hygiene and a test suite, a self-diagnosing launch failure, and **Neo**, a
+native desktop app for the launcher. Validated with `make check` (ruff + the offline
+suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
 
 ### Added
+
+- **Neo, a native Linux desktop app** (`neo-gui`, `gui/`). A real Qt Widgets
+  application, not a rewrite: `neo` is imported as a module, so the GUI and the CLI
+  share one implementation of auth, manifests, chunk downloads, verification and the
+  launch recipe — and one `config.json`, so changing your install root or Proton build
+  in either changes it in both. **The CLI is unaffected and stays stdlib-only**;
+  PySide6 is required only for the desktop app, and `neo` still runs on a bare Python
+  3.9 with nothing installed.
+
+  Six pages — Play, Library, Friends, Diagnostics, Settings, Account — with real
+  loading, empty and error states, dark/light themes that follow the desktop, HiDPI,
+  keyboard navigation and accessible names. Desktop integration makes no
+  DE-specific assumptions: freedesktop `.desktop` entry, scalable icon, AppStream
+  metainfo, `StartupWMClass` for dock matching, notifications, tray, single instance
+  and `neolauncher://` sign-in handover. Verified on KDE/Wayland; the same build is
+  intended to run on GNOME, XFCE, Cinnamon, Hyprland, Sway and COSMIC under Wayland
+  and X11.
+
+  Security matches the CLI's posture: the GUI never writes tokens (the CLI's `0600`
+  `auth.json` stays the only store), nothing is executed through a shell (launch
+  arguments are `shlex`-parsed into an argv), and every log pane, exported log,
+  diagnostics report and command preview is redacted first.
+
+  Install with `make install-all`; run from a checkout with `make run-gui`.
+  Packaging lives in `packaging/` (AUR `PKGBUILD`, Flatpak manifest, AppImage build
+  script, freedesktop files). **No on-disk format changed** — no migration needed.
+
+- **119 new offline tests for the desktop app.** `tests/test_gui_backend.py` (55) imports
+  no Qt at all; `tests/test_gui_widgets.py` (64) drives real widgets under the
+  `offscreen` platform, so both run in CI with no display server. `neo-gui
+  --self-check` opens every page in both themes and is wired to `make smoke-gui`.
 
 - **Game modifiers from the official Options panel.** Discord users were right:
   NeoLauncher 1.0.7's per-build Options → Modifiers sheet (Edit On Release, Instant
@@ -48,6 +80,33 @@ with `make check` (ruff + the offline suite + CLI smoke).
 - `Makefile` (`help`, `check`, `lint`, `format`, `test`, `smoke`, `dev`, `install`),
   `ruff.toml`, `.editorconfig`, `.gitattributes`.
 - README header artwork and a repository social-preview image (`docs/assets/`).
+
+### Fixed
+
+- **The desktop app ignored every mouse click.** `ToastHost` is stretched over the whole
+  window so notifications can be positioned freely, and it accepted mouse events, so it
+  won hit-testing everywhere and each click landed on the overlay instead of the button
+  beneath it. Keyboard input routes by focus and was unaffected, which is why Tab and
+  Space worked while the mouse did nothing. The overlay now carries a mask covering only
+  the rectangles the toasts occupy. Found on real hardware (CachyOS/Wayland).
+
+- **Enter did not activate a focused button** outside dialogs. `QPushButton` only enables
+  `autoDefault` inside a `QDialog`, so Return/Enter was inert in the main window while
+  Space worked — correct Qt behaviour, wrong for accessibility. Dialogs keep their
+  deliberate defaults, so a destructive button still never becomes the Enter action.
+
+- Background jobs could drop their results: Qt deleted the runnable, and its signal
+  object, before the queued completion signals reached the UI thread.
+
+- The GUI's log redactor missed flag-style secrets (`-AUTH_PASSWORD=`, `-fltoken=`,
+  `-p=`) because the pattern relied on a word boundary, which never matches before a
+  `-`. Live exchange codes could have reached a saved log or an exported diagnostics
+  report.
+
+- `make run-gui`, `make test-gui` and `make smoke-gui` ran the system interpreter, so
+  they failed with `ModuleNotFoundError` even after `make dev-gui` installed PySide6
+  into `.venv`. They now prefer `.venv/bin/python` and fall back to a distro-packaged
+  PySide6, with a clear message instead of a traceback. The CLI targets are unchanged.
 
 ### Changed
 

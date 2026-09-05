@@ -1,0 +1,38 @@
+# Flatpak manifest.
+#
+#   flatpak-builder --user --install build packaging/dev.neofn.NeoLauncher.yml
+#
+# The game itself runs outside the sandbox concerns of the launcher: Neo needs
+# broad filesystem access for install roots the user chooses, and network for
+# the CDN. `--talk-name=org.freedesktop.Notifications` gives desktop
+# notifications on every DE without portal-specific code.
+app-id: dev.neofn.NeoLauncher
+runtime: org.kde.Platform
+runtime-version: '6.7'
+sdk: org.kde.Sdk
+base: com.riverbankcomputing.PyQt.BaseApp
+base-version: '6.7'
+command: neo-gui
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --env=NEO_IN_FLATPAK=1
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - '*.la'
+  - '*.a'
+modules:
+  - name: neo
+    buildsystem: simple
+    build-commands:
+      - make PREFIX=/app install-all
+    sources:
+      - type: dir
+        path: ..
