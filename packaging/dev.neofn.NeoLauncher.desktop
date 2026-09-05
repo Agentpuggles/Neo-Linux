@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Neo
+GenericName=Game Launcher
+Comment=Launch and manage NeoFN builds on Linux
+Exec=neo-gui %u
+TryExec=neo-gui
+Icon=dev.neofn.NeoLauncher
+Terminal=false
+Categories=Game;
+Keywords=neo;neofn;fortnite;launcher;game;
+StartupNotify=true
+StartupWMClass=dev.neofn.NeoLauncher
+MimeType=x-scheme-handler/neolauncher;
+X-GNOME-UsesNotifications=true
+SingleMainWindow=true
