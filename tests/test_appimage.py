@@ -259,6 +259,40 @@ class TestReleaseInputs(unittest.TestCase):
         self.assertIn("--hash=sha256:", requirements)
 
 
+class TestCiFailureReporting(unittest.TestCase):
+    def run_check(self, script, *, actions="true"):
+        return subprocess.run(
+            ["bash", str(support.REPO_ROOT / "packaging/ci-check.sh"), sys.executable, "-c", script],
+            env={**os.environ, "GITHUB_ACTIONS": actions},
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def test_failure_tail_keeps_the_final_exception_within_githubs_limit(self):
+        result = self.run_check(
+            "import sys; print('noisy build output ' * 5000); "
+            "print('RuntimeError: final failure with 50% and Unicode →'); sys.exit(17)"
+        )
+        self.assertEqual(result.returncode, 17)
+        annotations = [line for line in result.stdout.splitlines() if line.startswith("::error ")]
+        self.assertEqual(len(annotations), 1)
+        message = annotations[0].split("::", 2)[2]
+        decoded = message.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+        self.assertLessEqual(len(decoded.encode("utf-8")), 4096)
+        self.assertIn("RuntimeError: final failure with 50% and Unicode →", decoded)
+
+    def test_success_is_not_reported_as_an_error(self):
+        result = self.run_check("print('success')")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "success\n")
+
+    def test_local_failures_do_not_emit_workflow_commands(self):
+        result = self.run_check("import sys; print('failed'); sys.exit(3)", actions="false")
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, "failed\n")
+
+
 class TestAppRun(unittest.TestCase):
     def test_spaces_callback_arguments_private_core_and_host_path(self):
         with support.temp_dir() as tmp:
