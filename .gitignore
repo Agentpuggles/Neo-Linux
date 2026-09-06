@@ -19,10 +19,13 @@ neo-install-*/
 *.swp
 .DS_Store
 
-# Nothing in this repo is built, so anything that looks like a build artifact is a
-# mistake — including copies of the launcher or downloaded game data.
+# Build output belongs in release artifacts, never in Git. Game data is local too.
 dist/
 build/
 *.egg-info/
 CloudDir/
 *.chunk
+
+*.AppImage
+*.AppImage.sha256
+*.AppImage.build-info.json

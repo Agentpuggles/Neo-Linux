@@ -1,10 +1,38 @@
 # Neo Desktop — GUI architecture
 
-`neo-gui` is the native Linux desktop client for NeoFN. It is a real X11/Wayland
+`neo-gui` opens the native Linux desktop client for NeoFN. When the optional
+CLI is installed, `neo` without arguments also opens the GUI. It is a real X11/Wayland
 application (Qt 6 / PySide6, QtWidgets): it has a `.desktop` entry, an icon, a
 window class (`dev.neofn.NeoLauncher`), desktop notifications, native file
 dialogs and a system tray icon. It is **not** a web view, an Electron shell or a
 localhost server.
+
+## Entry points and installation
+
+With no arguments, `neo` finds the matching checkout or installed `neo-gui` and
+executes it. Checkout runs can use `.venv`; installed launchers retain their own
+interpreter or bundled runtime. `NEO_BIN` can explicitly override the shared core.
+No Qt code is loaded when `neo` is imported or given an explicit CLI command.
+Headless invocations get a readable message pointing to `neo --help`.
+
+`make install` includes the GUI, private `<prefix>/share/neo/neo` backend, icon
+and desktop entry, **not** the public terminal command. `make install-cli` installs
+only that command; `make install-all` explicitly includes both. The desktop entry
+still invokes `neo-gui %u` using an absolute path, so OAuth callbacks need no CLI.
+User installs pin `GUI_PYTHON`; staged packages keep a portable interpreter.
+
+The loader prefers the private backend over a potentially older public CLI. A
+normal startup offers `CliInstallDialog` only if the CLI is absent and
+`gui_cli_prompt_dismissed` is false. Declining records that preference without
+restricting the GUI. Callbacks and `--self-check` skip the prompt; Settings always
+keeps an install action visible outside Advanced mode.
+
+`backend/cli_tool.py` checks for an existing CLI without executing files on PATH,
+then copies the bundled source to `~/.local/bin/neo` only on explicit consent. It
+publishes the complete executable with an exclusive hard link, so a concurrent
+file creation or dangling symlink cannot be overwritten. No network requests,
+privilege escalation or shell-profile edits are involved. Uninstall preserves
+user data alongside the private backend.
 
 ## Why PySide6 / Qt 6 (QtWidgets)
 
@@ -97,3 +125,14 @@ server or a filesystem layout.
   codes in the launch preview are masked exactly like the CLI does.
 * Uninstall keeps the CLI's guard (refuses any directory without a
   `.neo-manifest.json`) and asks for typed confirmation.
+
+## AppImage boundary
+
+The [AppImage build/release guide](appimage.md) describes the pinned toolchain and
+CI gates. PyInstaller bundles the private source backend and explicitly analyses
+its imports. `runtime.py` remains Qt-free: it resolves a durable AppImage launch
+command and strips bundle-specific loader/plugin paths from environments passed
+to host programs. Desktop Exec arguments use freedesktop quoting, not shell
+quoting. AppRun preserves PATH and discovers the host CA bundle without replacing
+explicit TLS trust overrides. GUI sign-in owns the GUI callback entry even when
+no public `neo` command has been installed.

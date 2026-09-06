@@ -2,10 +2,12 @@
 # neo — a native Linux launcher for NeoFN (neofn.dev)
 #
 # Reconstructed from NeoLauncher 1.0.7 (WinUI3) + BuildPatchServices.
-# Python 3.9+ stdlib only. Game runs through umu-run/Proton.
+# Python 3.9+ stdlib core; the default desktop UI needs PySide6.
+# Game runs through umu-run/Proton.
 # Written with AI assistance under human direction (README → Acknowledgements).
 #
 # Commands:
+#   neo                       open the desktop app (neo-gui)
 #   neo help [cmd]            this help; `neo help <cmd>` / `neo <cmd> help` = one command's help
 #   neo login                 Discord login (browser; neolauncher:// handler)
 #   neo whoami / logout       account info / drop session
@@ -1666,9 +1668,52 @@ def cmd_setup(args, auth):
     auth.save()
     ok(f"display name set: {confirmed}")
 
+# ---------------------------------------------------------------- desktop entry
+
+def open_gui():
+    """Open the desktop app without adding Qt dependencies to CLI commands.
+
+    Use the matching checkout or installed launcher before looking on PATH.
+    Exec keeps the GUI's exit code and signal handling, and also works with a
+    bundled (non-Python) neo-gui executable. Importing this module never opens Qt.
+    """
+    if not any(os.environ.get(key) for key in ("DISPLAY", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM")):
+        raise RuntimeError("Neo opens a desktop window by default, but no graphical session was found.\n"
+                           "Open Neo from your Linux desktop, or use `neo --help` for terminal commands.")
+
+    launcher = os.path.realpath(__file__)
+    here = os.path.dirname(launcher)
+    checkout = os.path.join(here, "gui", "neo-gui")
+    if os.path.isfile(checkout):
+        # Match `make run-gui`: a checkout's .venv contains PySide6 when the
+        # user installed it with `make dev-gui` or the virtualenv setup guide.
+        venv_python = os.path.join(here, ".venv", "bin", "python")
+        python = (venv_python if sys.prefix == sys.base_prefix and os.path.isfile(venv_python)
+                  else sys.executable)
+        command = [python, checkout]
+    else:
+        installed = os.path.join(here, "neo-gui")
+        gui = installed if os.path.isfile(installed) else shutil.which("neo-gui")
+        if not gui:
+            raise RuntimeError("Neo's desktop app is not installed.\n"
+                               "From a full Neo-Linux checkout, run `make install` (requires PySide6).\n"
+                               "The terminal commands still work: `neo --help`.")
+        command = [gui]
+
+    env = dict(os.environ)
+    if os.path.isfile(checkout):
+        env.setdefault("NEO_BIN", launcher)
+    # Installed GUIs load their private backend, not a possibly older optional CLI.
+    try:
+        os.execvpe(command[0], command, env)
+    except OSError as exc:
+        raise RuntimeError(f"Neo's desktop app could not start: {exc}\n"
+                           "Reinstall it with `make install`, or use `neo --help` for terminal commands.") from exc
+
+
 # ---------------------------------------------------------------- main
 # One table drives both `neo help` and every subcommand's summary, so the two
-# can't drift apart (or from README → Usage). Group names come from the README.
+# can't drift apart. Detailed usage lives in docs/cli-reference.md.
 _COMMAND_GROUPS = ("account", "game", "system")
 _COMMANDS = {
     "login":     ("account", "Discord login (browser; neolauncher:// handler)"),
@@ -1702,7 +1747,7 @@ class _NeoHelpFormatter(argparse.HelpFormatter):
         cmd = next((a for a in actions if not a.option_strings and a.dest == "cmd"), None)
         if cmd is None:  # subcommand parsers keep the normal usage line
             return super()._format_usage(usage, actions, groups, prefix)
-        return f"{prefix}{self._prog} <command> [options]\n\n"
+        return f"{prefix}{self._prog} [command] [options]\n\n"
 
     def _format_action(self, action):
         if isinstance(action, argparse._SubParsersAction):
@@ -1735,8 +1780,9 @@ class _NeoArgumentParser(argparse.ArgumentParser):
 
 def make_parser():
     p = _NeoArgumentParser(
-        prog="neo", description=f"NeoFN Linux launcher — v{VERSION}",
-        epilog="Run `neo <command> --help` (or `neo help <command>`) for a command's own options.")
+        prog="neo", description=f"NeoFN Linux launcher — v{VERSION}. Run `neo` with no arguments to open the desktop app.",
+        epilog="Terminal commands work without PySide6. Run `neo <command> --help` "
+               "(or `neo help <command>`) for a command's own options.")
     p.add_argument("--version", action="version", version=VERSION)
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command",
                            title="commands", prog="neo")
@@ -1835,9 +1881,11 @@ def make_parser():
     return p
 
 def main():
+    argv = sys.argv[1:]
+    if not argv:
+        return open_gui()
     p = make_parser()
     sub = p._subparsers_action  # _SubParsersAction; name → parser in .choices
-    argv = sys.argv[1:]
     # `neo <cmd> help` == `neo <cmd> --help`. Intercepted before parse_args
     # because for commands with a positional (install, import, config, …),
     # argparse would otherwise consume "help" as that positional's value and

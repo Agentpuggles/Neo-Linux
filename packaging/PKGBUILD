@@ -2,14 +2,13 @@
 pkgname=neo-linux
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="Native Linux launcher for NeoFN — CLI and desktop app"
+pkgdesc="Native Linux desktop launcher for NeoFN, with optional CLI usage"
 arch=('any')
 url="https://github.com/Agentpuggles/Neo-Linux"
 license=('MIT')
-# The CLI is stdlib-only; PySide6 is needed only by the desktop app.
-depends=('python')
+# The desktop app is the default entry point; CLI commands remain stdlib-only.
+depends=('python' 'pyside6')
 optdepends=(
-  'pyside6: the Neo desktop app (neo-gui)'
   'umu-launcher: recommended way to run the game under Proton'
   'wine: alternative to umu-launcher'
 )
@@ -18,5 +17,5 @@ sha256sums=('SKIP')
 
 package() {
   cd "$srcdir/Neo-Linux-$pkgver"
-  make DESTDIR="$pkgdir" PREFIX=/usr install-all
+  make DESTDIR="$pkgdir" PREFIX=/usr install
 }

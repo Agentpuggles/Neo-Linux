@@ -114,10 +114,12 @@ class TestStructure(unittest.TestCase):
                     block.append((line_number, line))
             # end of file flushes any trailing table
 
-    def test_readme_contents_table_matches_the_headings(self):
+    def test_readme_contents_matches_headings_when_present(self):
         text = read(ROOT / "README.md")
         parts = re.split(r"^## Contents\s*$", text, flags=re.M)
-        self.assertEqual(len(parts), 2, "README.md needs exactly one '## Contents' section")
+        if len(parts) == 1:
+            return  # a short, player-facing README does not need a Contents table
+        self.assertEqual(len(parts), 2, "README.md has more than one Contents section")
         contents = parts[1].split("\n## ", 1)[0]
         linked = {target.partition("#")[2] for _, target in links(contents)}
         h2 = [heading_anchor(line[3:]) for _, line in iter_lines(text) if line.startswith("## ")]
@@ -126,13 +128,19 @@ class TestStructure(unittest.TestCase):
                 continue
             with self.subTest(section=anchor):
                 self.assertIn(anchor, linked, "top-level section missing from Contents")
-        self.assertGreaterEqual(len(h2), 6, "README.md looks too thin to have a Contents table")
+
+    def test_readme_documents_the_desktop_default_and_terminal_opt_out(self):
+        text = read(ROOT / "README.md")
+        for command in ("make install", "make install-cli", "neo --help"):
+            self.assertIn(command, text)
+        self.assertIn("docs/assets/neo-gui.png", text)
+        self.assertLess(text.index("## Install"), text.index("## Prefer the terminal?"))
 
     def test_readme_links_every_document_in_docs(self):
         referenced = {target.split("#")[0] for _, target in links(read(ROOT / "README.md"))}
         for path in sorted((ROOT / "docs").glob("*.md")):
             with self.subTest(doc=path.name):
-                self.assertIn(f"docs/{path.name}", referenced, "docs/ file that no README table points at")
+                self.assertIn(f"docs/{path.name}", referenced, "docs/ file not linked from the README")
 
 
 class TestVersionDrift(unittest.TestCase):
@@ -158,7 +166,7 @@ class TestVersionDrift(unittest.TestCase):
         )
 
     def test_ci_matrix_covers_the_python_the_readme_promises(self):
-        minimum = re.search(r"\*\*Python\*\*\s*\|\s*≥\s*(\d+\.\d+)", read(ROOT / "README.md"))
+        minimum = re.search(r"\*\*Python(?: / Qt)?\*\*\s*\|[^\n]*?≥\s*(\d+\.\d+)", read(ROOT / "README.md"))
         self.assertIsNotNone(minimum, "README must state a minimum Python in the table")
         workflow = read(ROOT / ".github" / "workflows" / "ci.yml")
         tested = set(re.findall(r"""["'](\d+\.\d+)["']""", workflow))

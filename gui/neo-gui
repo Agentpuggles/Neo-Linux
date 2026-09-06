@@ -16,12 +16,14 @@ import sys
 
 
 def _package_root():
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS
     here = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
     prefix = os.path.dirname(here)  # <prefix>/bin/neo-gui -> <prefix>
     candidates = [
         os.environ.get("NEO_GUI_ROOT"),
         here,                                          # checkout: gui/neogui
-        os.path.join(prefix, "share", "neo"),          # make install-all
+        os.path.join(prefix, "share", "neo"),          # make install
         os.path.join(prefix, "lib", "neo"),            # distro packages
         "/usr/share/neo",
         "/usr/local/share/neo",
@@ -45,8 +47,11 @@ except ImportError as exc:  # pragma: no cover - install problem, not a code pat
             "  Fedora         sudo dnf install python3-pyside6\n"
             "  Debian/Ubuntu  sudo apt install python3-pyside6.qtwidgets\n"
             "  openSUSE       sudo zypper install python3-pyside6\n"
-            "  anything else  pip install --user PySide6\n\n"
-            "The `neo` command-line launcher works without it."
+            "\nIf your distro has no package, from the Neo-Linux checkout run:\n"
+            "  python3 -m venv .venv\n"
+            "  .venv/bin/python -m pip install PySide6\n"
+            "  make install\n\n"
+            "For terminal-only use: `make install-cli`, then `neo --help`."
         )
     sys.exit(f"Neo's desktop app could not start: {exc}")
 

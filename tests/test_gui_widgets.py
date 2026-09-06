@@ -11,10 +11,12 @@ dialogs stay disabled until confirmed, that the launch preview masks
 credentials, and that a background job's failure reaches the UI as a toast.
 """
 
+import contextlib
 import os
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("NEO_GUI_NO_ANIMATION", "1")
@@ -435,6 +437,97 @@ class TestSettingsView(WindowTestCase):
         self.assertEqual(self.service.config()["gui_accent"], "cyan")
 
 
+class TestOptionalCli(WindowTestCase):
+    def setUp(self):
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        self.home = stack.enter_context(support.temp_dir())
+        stack.enter_context(support.environment(HOME=str(self.home), PATH=str(self.home / "empty-bin")))
+        super().setUp()
+        self.window.show()
+        _app.processEvents()
+
+    def test_dialog_explains_recommendation_and_has_a_safe_not_now_choice(self):
+        from neogui.widgets.dialogs import CliInstallDialog
+
+        dialog = CliInstallDialog(self.window.ctx, str(self.home / ".local/bin/neo"))
+        self.assertIn("highly recommended", dialog.body_label.text())
+        self.assertIn("troubleshooting", dialog.body_label.text())
+        self.assertIn("later", dialog.body_label.text())
+        self.assertEqual(dialog.install.text(), "Install CLI (recommended)")
+        self.assertEqual(dialog.later.text(), "Not now")
+        self.assertTrue(dialog.later.isDefault())
+        self.assertFalse(dialog.install.isDefault())
+        dialog.later.click()
+        self.assertEqual(dialog.result(), 0)
+
+    def test_declining_saves_the_choice_without_installing_or_disabling_the_gui(self):
+        with mock.patch("neogui.mainwindow.CliInstallDialog") as prompt:
+            prompt.return_value.exec.return_value = 0
+            self.window.offer_cli_install()
+            self.window.offer_cli_install()
+            prompt.assert_called_once()
+        self.assertTrue(self.service.config()["gui_cli_prompt_dismissed"])
+        self.assertFalse(self.service.cli_status().installed)
+        self.window.navigate("library")
+        self.assertIs(self.window.stack.currentWidget(), self.window.views["library"])
+
+    def test_accepting_installs_the_cli_and_updates_settings_with_path_help(self):
+        with mock.patch("neogui.mainwindow.CliInstallDialog") as prompt:
+            prompt.return_value.exec.return_value = 1
+            self.window.offer_cli_install()
+        self.assertTrue(self.service.cli_status().installed)
+        self.assertTrue(self.service.config()["gui_cli_prompt_dismissed"])
+        settings = self.window.views["settings"]
+        self.assertFalse(settings.cli_install_btn.isEnabled())
+        self.assertIn("--help", settings.cli_note.text())
+        self.assertIn("PATH", settings.cli_note.text())
+
+    def test_settings_can_install_after_not_now_without_advanced_mode(self):
+        self.service.set_config("gui_cli_prompt_dismissed", True)
+        self.window.navigate("settings")
+        settings = self.window.views["settings"]
+        self.assertFalse(self.service.config()["gui_advanced_mode"])
+        self.assertTrue(settings.cli_install_btn.isEnabled())
+        settings.cli_install_btn.click()
+        _app.processEvents()
+        self.assertTrue(self.service.cli_status().installed)
+        self.assertEqual(settings.cli_install_btn.text(), "CLI installed")
+
+    def test_an_existing_cli_is_not_prompted_again(self):
+        self.service.install_cli()
+        with mock.patch("neogui.mainwindow.CliInstallDialog") as prompt:
+            self.window.offer_cli_install()
+            prompt.assert_not_called()
+
+    def test_install_failure_remains_optional_and_retryable(self):
+        from neogui.backend.errors import NeoError
+
+        with mock.patch.object(self.service, "install_cli", side_effect=NeoError("Permission denied")):
+            self.assertFalse(self.window.install_cli())
+        self.assertFalse(self.service.config()["gui_cli_prompt_dismissed"])
+        self.assertTrue(self.window.views["settings"].cli_install_btn.isEnabled())
+        self.assertTrue(self.window.toasts._toasts)
+
+    def test_the_offer_does_not_interrupt_nonmodal_sign_in(self):
+        self.window._login_dialog = mock.Mock()
+        try:
+            with mock.patch("neogui.mainwindow.CliInstallDialog") as prompt:
+                self.window.offer_cli_install()
+                prompt.assert_not_called()
+        finally:
+            self.window._login_dialog = None
+
+    def test_the_offer_does_not_interrupt_a_game_operation(self):
+        self.window.busy_operation = "install"
+        try:
+            with mock.patch("neogui.mainwindow.CliInstallDialog") as prompt:
+                self.window.offer_cli_install()
+                prompt.assert_not_called()
+        finally:
+            self.window.busy_operation = ""
+
+
 class TestDiagnosticsView(WindowTestCase):
     def test_session_log_records_lines(self):
         self.window.navigate("diagnostics")
@@ -478,6 +571,20 @@ class TestDiagnosticsView(WindowTestCase):
 
 
 class TestDialogs(WindowTestCase):
+    def test_sign_in_registers_the_gui_not_a_frozen_python_command(self):
+        from neogui.widgets.dialogs import LoginDialog
+
+        dialog = LoginDialog(self.window.ctx)
+        with (
+            mock.patch("neogui.widgets.dialogs.register_scheme_handler", return_value=True) as register,
+            mock.patch("neogui.widgets.dialogs.open_url", return_value=True),
+            mock.patch.object(self.service, "install_scheme_handler") as cli_handler,
+        ):
+            dialog._open_browser()
+            register.assert_called_once_with(self.service)
+            cli_handler.assert_not_called()
+        dialog.reject()
+
     def test_a_destructive_dialog_stays_disabled_until_the_phrase_matches(self):
         from neogui.widgets.dialogs import ConfirmDialog
 
@@ -797,6 +904,13 @@ class TestPlatformIntegration(unittest.TestCase):
                 parser.read(path)
                 entry = parser["Desktop Entry"]
                 self.assertEqual(entry["Type"], "Application")
+                self.assertNotIn("SingleMainWindow", entry)
+                import shutil
+                import subprocess
+                validator = shutil.which("desktop-file-validate")
+                if validator:
+                    result = subprocess.run([validator, str(path)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(entry["Icon"], plat.APP_ID)
                 self.assertEqual(
                     entry["StartupWMClass"],
@@ -812,6 +926,42 @@ class TestPlatformIntegration(unittest.TestCase):
                     os.environ.pop("XDG_DATA_HOME", None)
                 else:
                     os.environ["XDG_DATA_HOME"] = old
+
+    def test_an_appimage_entry_uses_the_durable_quoted_filename(self):
+        import configparser
+        from neogui import platform_integration as plat
+
+        image = "/home/gamer/Applications/Neo 100%.AppImage"
+        with (
+            support.temp_dir() as tmp,
+            support.environment(XDG_DATA_HOME=str(tmp), APPIMAGE=image, NEO_GUI_EXEC=None),
+            mock.patch.object(sys, "frozen", True, create=True),
+            mock.patch.object(plat.subprocess, "run"),
+        ):
+            entry = plat.install_desktop_entry()
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(entry)
+            self.assertEqual(parser["Desktop Entry"]["Exec"], '"/home/gamer/Applications/Neo 100%%.AppImage" %u')
+            self.assertEqual(parser["Desktop Entry"]["TryExec"], image)
+
+    def test_reregistering_replaces_a_stale_mount_entry(self):
+        from neogui import platform_integration as plat
+
+        with (
+            support.temp_dir() as tmp,
+            support.environment(XDG_DATA_HOME=str(tmp), NEO_GUI_EXEC='"/apps/Neo.AppImage"'),
+            mock.patch.object(plat.shutil, "which", return_value="/usr/bin/xdg-mime"),
+            mock.patch.object(plat.subprocess, "run") as run,
+        ):
+            run.return_value.returncode = 0
+            path = plat.desktop_entry_path()
+            path.parent.mkdir(parents=True)
+            path.write_text("[Desktop Entry]\nExec=/tmp/.mount_old/usr/bin/neo-gui %u\n")
+            self.assertTrue(plat.register_scheme_handler(None))
+            self.assertIn('Exec="/apps/Neo.AppImage" %u', path.read_text())
+            self.assertNotIn(".mount_old", path.read_text())
+            run.return_value.returncode = 1
+            self.assertFalse(plat.register_scheme_handler(None))
 
     def test_environment_probes_never_raise(self):
         from neogui import platform_integration as plat

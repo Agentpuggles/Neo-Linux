@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..platform_integration import copy_to_clipboard, open_url
+from ..backend.cli_tool import RECOMMENDATION
+from ..platform_integration import copy_to_clipboard, open_url, register_scheme_handler
 from ..theme import SPACE
 from .common import Button, Card, Field, label
 
@@ -71,6 +72,25 @@ class BaseDialog(QDialog):
         btn.setAutoDefault(default)
         self.buttons.addWidget(btn)
         return btn
+
+
+class CliInstallDialog(BaseDialog):
+    """An optional, one-time offer — declining never gates the desktop app."""
+
+    def __init__(self, ctx, path: str) -> None:
+        super().__init__(ctx, "Install the command-line tool?", width=560)
+        self.set_body(RECOMMENDATION)
+        self.content.addWidget(label(f"Installs the neo command at:\n{path}", "small", wrap=True))
+        self.content.addWidget(label(
+            "No administrator password or extra download is needed. "
+            "Existing commands and your game files will not be overwritten.",
+            "small", wrap=True,
+        ))
+        self.later = self.add_button("Not now", on_click=self.reject, default=True)
+        self.install = self.add_button(
+            "Install CLI (recommended)", variant="primary", on_click=self.accept
+        )
+        self.later.setFocus()
 
 
 class ConfirmDialog(BaseDialog):
@@ -326,7 +346,7 @@ class LoginDialog(BaseDialog):
         self.code_field.setFocus()
 
     def _open_browser(self) -> None:
-        self.service.install_scheme_handler()
+        register_scheme_handler(self.service)
         if not open_url(self.service.login_url()):
             self._fail("Could not open a browser. Use “Copy link” and paste it manually.")
 
