@@ -1,9 +1,8 @@
 # Contributing to neo
 
-Thanks for being here. This is a small, opinionated tool — one executable file, no
-dependencies, no build step — and most of the difficulty is in getting the protocol
-details right rather than in the code volume. Read the constraints below before you
-start and a review should be quick.
+Thanks for being here. Neo is a desktop-first launcher with a shared Python backend
+and an optional command-line workflow. The GUI uses PySide6; explicit CLI commands
+stay standard-library-only. Read the constraints below before you start.
 
 `neo` and this repository were written with substantial AI assistance (see
 [README → Acknowledgements](README.md#acknowledgements)). That does not lower the bar:
@@ -27,9 +26,10 @@ a contribution.
 
 ## Ground rules
 
-1. **One file, stdlib only.** `neo` ships as a single executable Python file with no
-   dependencies. If a change needs a third-party package, it needs a very good reason
-   and that reason belongs in the PR description.
+1. **Keep the core stdlib-only.** `neo` remains a single executable Python file.
+   Importing it or running an explicit CLI command must not import Qt or require a
+   display. The default no-argument invocation hands off to `gui/neo-gui`; the GUI
+   imports the shared backend rather than duplicating protocol code.
 2. **Support Python ≥ 3.9.** That is the floor CI tests against. No `match`, no
    `X | Y` type syntax at runtime, no `str.removeprefix` on older assumptions.
 3. **Never trust the CDN, never trust the manifest.** Anything arriving from the
@@ -45,23 +45,31 @@ a contribution.
 ```sh
 git clone https://github.com/Agentpuggles/Neo-Linux.git
 cd Neo-Linux
-make dev          # optional: a venv with ruff (the only dev tool)
-make check        # lint + tests + CLI smoke, exactly what CI runs
+make dev-gui      # a venv with Ruff and PySide6
+source .venv/bin/activate
+make check        # lint + offline tests + CLI smoke
+make check-gui    # also run the offscreen Qt tests and desktop self-check
 ```
 
-Nothing has to be installed for the launcher itself:
+For CLI/backend-only development, `make dev` installs Ruff without Qt. Explicit
+terminal commands need no third-party packages:
 
 ```sh
 python3 neo --help
 ```
 
 `make` targets worth knowing: `lint`, `lint-fix`, `format` (tests only), `test`,
-`smoke`, `check`, `install`, `clean`. Run `make help` for the list.
+`smoke`, `check`, `run-gui`, `test-gui`, `install` (GUI), `install-cli`, `install-all` (both), `appimage`,
+`clean`. See [desktop setup](docs/desktop-setup.md) for runtime installation and
+packaging, or run `make help` for the full list.
 
 ## Repo layout
 
 ```
-neo                          the launcher: everything, ~800 lines, stdlib only
+neo                          shared core + CLI; no arguments opens the GUI
+gui/neo-gui                  desktop bootstrap
+gui/neogui/                  Qt UI, Qt-free backend adapter and desktop integration
+packaging/                   distro recipes, installer helpers and desktop metadata
 docs/protocol.md             the wire format, validated against production
 docs/engineering-notes.md    what broke, why, and how it was diagnosed
 CHANGELOG.md                 release history and known issues
@@ -72,6 +80,10 @@ tests/                       offline unit tests (stdlib unittest, no network)
   test_installer.py          build selection, file assembly, path containment
   test_auth.py               OAuth quirks, session store, refresh timing
   test_cli.py                exit codes, help text, config persistence
+  test_desktop_entry.py       GUI dispatch, source installs and safe uninstall
+  test_cli_tool.py           optional CLI install safety and prompt preference
+  test_gui_backend.py         Qt-free service tests
+  test_gui_widgets.py         offscreen Qt interaction tests
   test_docs.py               links, anchors, structure, version drift
 .github/                     CI, issue and PR templates, dependabot
 ruff.toml                    lint config (see the comment about the dense style)
@@ -92,8 +104,9 @@ Makefile                     the shortcuts above
 - **Adding a command** is three edits:
 
   ```python
-  # 1. argparse, in main():
-  s = sub.add_parser("repair"); s.add_argument("version", nargs="?")
+  # 1. summary in _COMMANDS, then argparse in make_parser():
+  # "repair": ("game", "repair an installed build"),
+  s = add("repair"); s.add_argument("version", nargs="?")
 
   # 2. a handler, in the section that owns the behaviour:
   def cmd_repair(args, auth): ...
@@ -102,15 +115,16 @@ Makefile                     the shortcuts above
   if args.cmd == "repair": return cmd_repair(args, auth)
   ```
 
-  Then document it in the README's usage table and add `repair` to the subcommand
-  lists in `tests/test_cli.py` (that test is what keeps `--help` honest).
+  Then document it in [the CLI reference](docs/cli-reference.md) and add `repair`
+  to the subcommand lists in `tests/test_cli.py` (that test is what keeps `--help` honest).
 - **User-facing failures** print one line of actionable text and `sys.exit(1)`. No
   tracebacks for network, auth or disk errors — that is the difference between a bug
   report and a support thread.
 
 ## Testing
 
-CI runs the suite on every push across Python 3.9 → 3.14. It is deliberately offline:
+CI runs the offline suite and CLI smoke checks on every push across Python
+3.9 → 3.13. The suite is deliberately offline:
 `tests/support.py` redirects `NEO_HOME`, `NEO_CACHE` and `XDG_CONFIG_HOME` into a
 temporary directory and stubs `neo.http` / `neo.jhttp`, so tests never touch the real
 account, cache, or network.
@@ -124,11 +138,14 @@ Write new tests against the same fixtures:
 | install/verify logic | `support.manifest_dict` and `neo.assemble_file` |
 | auth or token shape | `stub_json_http` in `tests/test_auth.py` |
 | CLI surface | `support.run_cli(...)` with the expected exit code |
+| Default entry point or packaging | `tests/test_desktop_entry.py`; test both user and staged installs |
+| GUI behaviour | `tests/test_gui_widgets.py`, with Qt driven offscreen |
 
 Run it directly when you need the verbose output:
 
 ```sh
-python3 -m unittest discover -s tests -t . -v
+make test
+make test-gui
 python3 -m unittest tests.test_chunks -v
 ```
 
@@ -145,7 +162,11 @@ Each fact has one home; keep it there.
 
 | Document | Owns |
 | --- | --- |
-| [`README.md`](README.md) | what the tool does, how to use it, how to fix the common failures |
+| [`README.md`](README.md) | the player-facing GUI quick start and common fixes |
+| [`docs/desktop-setup.md`](docs/desktop-setup.md) | desktop installation, virtualenvs, updates and packaging |
+| [`docs/cli-reference.md`](docs/cli-reference.md) | all terminal commands, settings, paths and environment variables |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | detailed startup, account, download and launch fixes |
+| [`docs/gui-architecture.md`](docs/gui-architecture.md) | GUI entry points, layers and platform integration |
 | [`docs/protocol.md`](docs/protocol.md) | the wire format: endpoints, encodings, chunk layout, launch recipe |
 | [`docs/engineering-notes.md`](docs/engineering-notes.md) | diagnoses, dead ends, lessons — the narrative |
 | [`CHANGELOG.md`](CHANGELOG.md) | what changed per release, plus current known issues |
@@ -154,7 +175,7 @@ If you change how `neo` talks to a service, `docs/protocol.md` changes in the sa
 PR; the doc names the function it describes (`parse_num`, `parse_chunk`, …) and
 `tests/test_protocol.py` pins the doc's own examples, so drift fails CI. `tests/test_docs.py`
 additionally checks that every relative link and `#anchor` resolves, that headings and
-tables stay well-formed, that the Contents table covers every README section, and
+tables stay well-formed, that any Contents section covers the README headings, and
 that the version in the README and CHANGELOG matches `neo --version`.
 
 ## Pull requests
@@ -194,5 +215,12 @@ Maintainers only, and deliberately boring:
    `make test` checks all three agree.
 2. Add the `[X.Y.Z]: …/compare/vPREV...vX.Y.Z` link definition to `CHANGELOG.md`.
 3. `make check`, then the manual install/verify/launch pass.
-4. `git tag vX.Y.Z && git push origin vX.Y.Z`, publish a GitHub release with the
-   changelog section as the notes, and attach nothing but the `neo` file.
+4. Push a version tag matching `neo`'s `VERSION`. The [AppImage workflow](.github/workflows/appimage.yml)
+   builds on Ubuntu 22.04, checks the actual image and Qt widgets, and prepares a
+   **draft** release with the AppImage, SHA-256 checksum and build information.
+   Ordinary branch pushes/manual runs only upload test artifacts.
+5. Review the draft's notes, add the changelog highlights, and complete its manual
+   X11/Wayland, Discord callback, game-launch and license/source-availability checks.
+   Publish the draft explicitly; the workflow never publishes or overwrites a public
+   release. See [AppImage release details](docs/appimage.md#github-actions-and-publishing).
+   The single `neo` file alone is CLI-only, not the default desktop distribution.

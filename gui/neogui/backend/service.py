@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Callable
 from collections.abc import Iterable
 
+from ..runtime import host_environment
+from . import cli_tool
 from .core import neo_module
 from .errors import NeoError, classify
 from .models import (
@@ -118,6 +120,7 @@ GUI_SETTING_DEFAULTS = {
     "gui_notify_on_finish": True,
     "gui_confirm_launch": False,
     "gui_advanced_mode": False,
+    "gui_cli_prompt_dismissed": False,
 }
 
 
@@ -149,6 +152,17 @@ class NeoService:
 
     def human(self, n: float) -> str:
         return self._neo.human(n)
+
+    # ---------------------------------------------------------- optional CLI
+    def cli_status(self) -> cli_tool.CliStatus:
+        return cli_tool.cli_status(Path(self._neo.__file__))
+
+    def should_offer_cli(self) -> bool:
+        return (not self.config().get("gui_cli_prompt_dismissed", False)
+                and not self.cli_status().installed)
+
+    def install_cli(self) -> cli_tool.CliStatus:
+        return cli_tool.install_cli(Path(self._neo.__file__))
 
     # ---------------------------------------------------------------- config
     def config(self) -> dict:
@@ -1009,7 +1023,7 @@ class NeoService:
             proc = subprocess.Popen(
                 cmd,
                 cwd=plan.working_dir,
-                env=plan.env,
+                env=host_environment(plan.env),
                 stderr=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 start_new_session=True,

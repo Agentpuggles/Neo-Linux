@@ -1,0 +1,124 @@
+name: AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths:
+      - neo
+      - gui/**
+      - packaging/**
+      - tests/**
+      - Makefile
+      - ruff.toml
+      - .github/workflows/appimage.yml
+  pull_request:
+    paths:
+      - neo
+      - gui/**
+      - packaging/**
+      - tests/**
+      - Makefile
+      - ruff.toml
+      - .github/workflows/appimage.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appimage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: packaging/appimage-requirements.txt
+      - name: Check release version
+        id: version
+        env:
+          REF: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python packaging/appimage.py version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$REF" == refs/tags/* && "$TAG" != "v$version" ]]; then
+            echo "Tag $TAG does not match neo VERSION ($version)" >&2
+            exit 1
+          fi
+      - name: Install build and Qt host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils desktop-file-utils file patchelf \
+            libgl1 libegl1 libdbus-1-3 libglib2.0-0 libfontconfig1 libfreetype6 \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0 libxcb-sync1 \
+            libsm6 libice6 fonts-dejavu-core
+      - name: Build and smoke-test the actual AppImage (no FUSE)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: packaging/ci-check.sh packaging/build-appimage.sh
+      - name: Lint and offline regression tests
+        run: |
+          build/appimage/venv/bin/python -m pip install ruff==0.16.6
+          packaging/ci-check.sh make check PYTHON=build/appimage/venv/bin/python RUFF=build/appimage/venv/bin/ruff
+      - name: Qt widget, prompt, and desktop integration tests
+        run: packaging/ci-check.sh make test-gui GUI_PYTHON="$PWD/build/appimage/venv/bin/python"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neo-appimage-x86_64
+          path: |
+            build/Neo-v*-x86_64.AppImage
+            build/Neo-v*-x86_64.AppImage.sha256
+            build/Neo-v*-x86_64.AppImage.build-info.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  draft-release:
+    # Branch/PR/manual builds produce artifacts only. A matching version tag
+    # prepares a draft; publishing remains an explicit maintainer decision.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: neo-appimage-x86_64
+          path: release
+      - name: Prepare draft release, never overwrite a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$TAG" = "v$VERSION"
+          (cd release && sha256sum -c *.sha256)
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [[ "$draft" != true ]]; then
+              echo "Release $TAG is already public; refusing to replace its assets." >&2
+              exit 1
+            fi
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --verify-tag --draft \
+              --title "Neo $TAG" --notes-file packaging/APPIMAGE-RELEASE-NOTES.md
+          fi

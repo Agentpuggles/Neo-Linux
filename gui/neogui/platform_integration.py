@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
+import sys
 import shutil
 import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication
+
+from .runtime import desktop_argument, desktop_value, host_environment, launch_argv
 
 APP_ID = "dev.neofn.NeoLauncher"
 APP_NAME = "Neo"
@@ -53,20 +57,28 @@ def open_path(path: str) -> bool:
     """Open a file or folder with the user's chosen handler (portal-aware)."""
     if not path:
         return False
+    if getattr(sys, "frozen", False) and _host_open(os.path.abspath(os.path.expanduser(path))):
+        return True
     return QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.expanduser(path)))
 
 
 def open_url(url: str) -> bool:
     if not url:
         return False
+    if getattr(sys, "frozen", False) and _host_open(url):
+        return True
     if QDesktopServices.openUrl(QUrl(url)):
         return True
     # Fallback for minimal sessions where Qt has no URL handler registered.
+    return _host_open(url)
+
+
+def _host_open(url: str) -> bool:
     opener = shutil.which("xdg-open")
     if opener:
         with contextlib.suppress(OSError):
             subprocess.Popen(
-                [opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                [opener, url], env=host_environment(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             return True
     return False
@@ -108,7 +120,7 @@ def notify(title: str, body: str = "", *, tray=None, urgent: bool = False) -> No
     args += [title, body]
     with contextlib.suppress(Exception):
         subprocess.run(
-            args, timeout=5, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            args, env=host_environment(), timeout=5, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
 
 
@@ -177,10 +189,13 @@ def install_desktop_entry(launch_command: str | None = None) -> Path:
     """
     from . import icons as icon_module
 
-    exec_cmd = launch_command or detect_launch_command()
+    argv = shlex.split(launch_command) if launch_command else launch_argv()
+    if not argv:
+        raise ValueError("The desktop launch command is empty")
+    exec_cmd = " ".join(desktop_argument(arg) for arg in argv)
     entry = desktop_entry_path()
     entry.parent.mkdir(parents=True, exist_ok=True)
-    tryexec = exec_cmd.split()[0]
+    tryexec = desktop_value(argv[0])
     entry.write_text(DESKTOP_FILE.format(exec=exec_cmd, tryexec=tryexec), encoding="utf-8")
     entry.chmod(0o755)
 
@@ -197,6 +212,7 @@ def install_desktop_entry(launch_command: str | None = None) -> Path:
             with contextlib.suppress(Exception):
                 subprocess.run(
                     [binary, *args],
+                    env=host_environment(),
                     check=False,
                     timeout=20,
                     stdout=subprocess.DEVNULL,
@@ -214,45 +230,30 @@ def remove_desktop_entry() -> None:
 
 def detect_launch_command() -> str:
     """The command that starts this app, however it was installed."""
-    override = os.environ.get("NEO_GUI_EXEC")
-    if override:
-        return override
-    found = shutil.which("neo-gui")
-    if found:
-        return found
-    import sys
-
-    main = Path(sys.argv[0]).resolve()
-    if main.name in ("neo-gui", "neo-gui.py") and os.access(main, os.X_OK):
-        return str(main)
-    # Running from a checkout. `-m neogui` only resolves if the directory
-    # holding the package is on the path, and a .desktop entry starts with an
-    # empty environment — so pin it explicitly rather than hoping PYTHONPATH is
-    # set when the user clicks the menu item.
-    package_root = Path(__file__).resolve().parents[1]
-    checkout_script = package_root / "neo-gui"
-    if checkout_script.is_file() and os.access(checkout_script, os.X_OK):
-        return str(checkout_script)
-    return f"env PYTHONPATH={package_root} {sys.executable} -m neogui"
+    return shlex.join(launch_argv())
 
 
 def register_scheme_handler(service) -> bool:
     """Own neolauncher:// so the Discord redirect comes back into the GUI."""
-    if not is_desktop_entry_installed():
-        with contextlib.suppress(Exception):
-            install_desktop_entry()
+    # Re-register the current launcher: an AppImage may have moved or replaced
+    # a source install. Never retain a stale /tmp/.mount_... callback command.
+    try:
+        install_desktop_entry()
+    except Exception:
+        return False
     binary = shutil.which("xdg-mime")
     if not binary:
         return False
     with contextlib.suppress(Exception):
-        subprocess.run(
+        result = subprocess.run(
             [binary, "default", f"{APP_ID}.desktop", "x-scheme-handler/neolauncher"],
+            env=host_environment(),
             check=False,
             timeout=10,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return True
+        return result.returncode == 0
     return False
 
 
@@ -263,6 +264,7 @@ def scheme_handler_owner() -> str:
     try:
         out = subprocess.run(
             [binary, "query", "default", "x-scheme-handler/neolauncher"],
+            env=host_environment(),
             check=False,
             timeout=10,
             capture_output=True,

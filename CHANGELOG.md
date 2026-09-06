@@ -11,6 +11,23 @@ All notable changes to `neo` are documented here, newest first. The format follo
 
 ## [Unreleased]
 
+### Packaging
+
+- Added versioned x86-64 AppImage builds with an isolated, hash-pinned Python/Qt
+  toolchain, reviewed appimagetool/runtime hashes, bundled license notices,
+  checksums and recorded build information. The frozen backend's otherwise-hidden
+  imports are now explicitly collected.
+- Added Ubuntu 22.04 AppImage CI: test the actual relocated bundle without FUSE,
+  run offline and Qt widget regressions, and retain downloadable test artifacts.
+  Matching version tags prepare draft releases only; publishing requires review.
+- AppImage desktop entries and Discord callbacks now use the durable image path,
+  correctly quoting spaces/percent signs. GUI sign-in registers the GUI rather
+  than trying to run the private backend through a frozen interpreter.
+- Restore the host's library/plugin search environment when launching umu/Proton,
+  browsers and desktop utilities. The AppImage never injects its bin folder into
+  the host PATH. Self-checks block network access and leave live-instance sockets
+  alone; the optional CLI remains genuinely optional inside the bundle.
+
 Repository hygiene and a test suite, a self-diagnosing launch failure, and **Neo**, a
 native desktop app for the launcher. Validated with `make check` (ruff + the offline
 suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
@@ -21,9 +38,9 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
   application, not a rewrite: `neo` is imported as a module, so the GUI and the CLI
   share one implementation of auth, manifests, chunk downloads, verification and the
   launch recipe — and one `config.json`, so changing your install root or Proton build
-  in either changes it in both. **The CLI is unaffected and stays stdlib-only**;
-  PySide6 is required only for the desktop app, and `neo` still runs on a bare Python
-  3.9 with nothing installed.
+  in either changes it in both. **Explicit CLI commands stay stdlib-only**;
+  PySide6 is required for the default desktop experience, while commands such as
+  `neo --help` still run on bare Python 3.9.
 
   Six pages — Play, Library, Friends, Diagnostics, Settings, Account — with real
   loading, empty and error states, dark/light themes that follow the desktop, HiDPI,
@@ -39,7 +56,7 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
   arguments are `shlex`-parsed into an argv), and every log pane, exported log,
   diagnostics report and command preview is redacted first.
 
-  Install with `make install-all`; run from a checkout with `make run-gui`.
+  Install with `make install`; run from a checkout with `./neo` or `make run-gui`.
   Packaging lives in `packaging/` (AUR `PKGBUILD`, Flatpak manifest, AppImage build
   script, freedesktop files). **No on-disk format changed** — no migration needed.
 
@@ -110,14 +127,46 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
 
 ### Changed
 
+- **The GUI now offers an optional CLI installation.** The first normal launch
+  offers **Install CLI (recommended)** or **Not now**, explaining that the CLI is
+  highly recommended for troubleshooting and doing tasks manually, but can be
+  installed later from **Settings → Command-line tool**. Declines are remembered;
+  existing CLI installations, sign-in callbacks and self-checks are not prompted.
+  Installation copies the bundled core into `~/.local/bin/neo` without downloads,
+  sudo, shell-profile edits or overwriting existing commands. Settings includes
+  PATH guidance; installation failures leave the GUI usable and can be retried.
+- **GUI installs keep the shared backend private.** `make install` / `install-gui`
+  place it in `share/neo/neo`, so declining the CLI does not remove any app
+  functionality. Existing CLI commands are left untouched; `make install-all`
+  explicitly includes both interfaces. No game data or session migration is needed.
+
+- **The GUI is now the default way to use Neo.** Running `neo` without arguments
+  opens the desktop app; `neo --help` and all explicit commands remain Qt-free.
+  Checkout launches find the local virtualenv, installed launches use the matching
+  `neo-gui`, and headless/missing-GUI failures point to setup or terminal usage.
+- **`make install` now installs the desktop app**, menu entry and icon, offering
+  the CLI from the GUI. `make install-cli` retains the lightweight installation;
+  `install-gui` / `install-all` remain available for GUI-only / both interfaces. User installs retain the
+  selected GUI interpreter, and desktop/backend lookup no longer depends on
+  `~/.local/bin` being on PATH. The Arch recipe now requires PySide6.
+- **Uninstall removes app files, not user data.** `make uninstall` and
+  `make uninstall-all` preserve sessions, state, cache and settings even when they
+  share the default `~/.local/share/neo` directory with the GUI package. No data
+  format changes or migration are needed.
+- **A shorter, player-first README** leads with desktop setup, Discord sign-in,
+  install and Play. Full terminal usage, configuration and troubleshooting now
+  live in linked guides under `docs/`. Offline entry-point/install tests cover
+  Qt-free CLI usage, menu paths, virtualenvs, callbacks and safe removal; CI runs
+  the offline suite in addition to its existing smoke checks.
+
 - **Help got a real directory.** `neo help` / `--help` now prints the command list
   grouped under `account` / `game` / `system` with a one-line summary per command
-  (a compact `usage: neo <command> [options]` replaces the stock argparse usage line,
+  (a compact `usage: neo [command] [options]` replaces the stock argparse usage line,
   whose `{login,whoami,…}` choice list wrapped on every terminal). Every subcommand
   got its own summary plus helps and metavars on its positionals, so
   `neo install --help` reads `[VER]  build to install …` instead of a bare
   `[version]`. One `_COMMANDS` table drives it all, so `neo help`, `neo <cmd> --help`
-  and README → Usage cannot drift apart.
+  stay in sync; detailed usage lives in docs/cli-reference.md.
 - `neo`: `to_winpath()` and `changelist_number()` are module-level functions instead of
   nested closures — they carry real bug-fix logic (see below) and are now unit-tested.
   Behaviour is unchanged.

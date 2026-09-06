@@ -32,7 +32,7 @@ modules:
   - name: neo
     buildsystem: simple
     build-commands:
-      - make PREFIX=/app install-all
+      - make PREFIX=/app install
     sources:
       - type: dir
         path: ..

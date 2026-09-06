@@ -18,3 +18,5 @@ jobs:
           python neo --help
           python neo config --help
           python neo install --help
+      - name: offline tests (including desktop entry points and docs)
+        run: make test PYTHON=python

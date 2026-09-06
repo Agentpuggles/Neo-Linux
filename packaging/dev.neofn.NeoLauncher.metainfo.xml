@@ -28,7 +28,6 @@
   <url type="homepage">https://github.com/Agentpuggles/Neo-Linux</url>
   <url type="bugtracker">https://github.com/Agentpuggles/Neo-Linux/issues</url>
   <provides>
-    <binary>neo</binary>
     <binary>neo-gui</binary>
   </provides>
   <releases>

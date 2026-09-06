@@ -2,9 +2,8 @@
 
 `neo` is a single executable file with no `.py` suffix, so a plain import will
 not find it. This mirrors the loader the test-suite uses (tests/support.py) and
-is the *only* place the GUI reaches for the CLI implementation: everything else
-imports `neo_module()` from here, so the GUI and the CLI can never run two
-different copies of the protocol code.
+is the *only* place the GUI loads the shared implementation. Installed GUIs
+prefer their private backend; the optional public CLI is not a GUI dependency.
 """
 
 from __future__ import annotations
@@ -33,10 +32,16 @@ def candidate_paths() -> list[Path]:
     if env:
         out.append(Path(env).expanduser())
 
+    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+        out.append(Path(sys._MEIPASS) / "neo")
+
+    # Private installed backend (or PyInstaller data), not the optional CLI.
+    out.append(here.parents[2] / "neo")
     # gui/neogui/backend/core.py -> repo root
     out.append(here.parents[3] / "neo")
-    # installed side by side: <prefix>/share/neo/neo
-    out.append(here.parents[3] / "share" / "neo" / "neo")
+    # Installed package: <prefix>/share/neo/neogui/backend/core.py.
+    # Resolve the matching CLI even when <prefix>/bin is absent from PATH.
+    out.append(here.parents[4] / "bin" / "neo")
 
     found = shutil.which("neo")
     if found:
@@ -74,7 +79,7 @@ def launcher_path() -> Path:
         except OSError:
             continue
     raise LauncherNotFound(
-        "could not find the `neo` launcher. Install it (`make install`) or point "
+        "could not find Neo's shared backend. Reinstall the desktop app (`make install`) or point "
         "NEO_BIN at the file."
     )
 

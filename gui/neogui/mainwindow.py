@@ -41,7 +41,7 @@ from .views.friends import FriendsView
 from .views.library import LibraryView
 from .views.play import PlayView
 from .views.settings import SettingsView
-from .widgets.dialogs import ConfirmDialog, DetailDialog, InstallDialog, LoginDialog
+from .widgets.dialogs import CliInstallDialog, ConfirmDialog, DetailDialog, InstallDialog, LoginDialog
 from .widgets.toast import ToastHost
 
 DESTINATIONS = [
@@ -103,6 +103,9 @@ class AppContext:
     def start_install(self, version: str | None = None) -> None:
         self.window.start_install(version)
 
+    def install_cli(self) -> bool:
+        return self.window.install_cli()
+
     def start_verify(self, version: str | None, *, repair: bool) -> None:
         self.window.start_verify(version, repair=repair)
 
@@ -136,6 +139,7 @@ class MainWindow(QMainWindow):
         self._launch_plan: LaunchPlan | None = None
         self._login_dialog: LoginDialog | None = None
         self._launch_output: list = []
+        self._cli_prompt_offered = False
 
         self.setWindowTitle("Neo")
         self.setMinimumSize(940, 640)
@@ -319,6 +323,36 @@ class MainWindow(QMainWindow):
         if self.isActiveWindow() and not urgent:
             return
         notify(title, body, tray=self.tray, urgent=urgent)
+
+    # ----------------------------------------------------------- optional CLI
+    def offer_cli_install(self) -> None:
+        # Do not interrupt sign-in, a running operation, or another dialog.
+        if (self._cli_prompt_offered or not self.isVisible() or self.busy_operation or self._login_dialog
+                or self.state.game_running or QApplication.activeModalWidget() is not None):
+            return
+        if not self.service.should_offer_cli():
+            return
+        self._cli_prompt_offered = True
+        dialog = CliInstallDialog(self.ctx, str(self.service.cli_status().path))
+        if dialog.exec():
+            self.install_cli()
+        else:
+            self.state.set_config("gui_cli_prompt_dismissed", True)
+
+    def install_cli(self) -> bool:
+        try:
+            status = self.service.install_cli()
+        except NeoError as exc:
+            self.show_error(exc)
+            self.views["settings"].refresh_cli_status()
+            return False
+        self.state.set_config("gui_cli_prompt_dismissed", True)
+        self.views["settings"].refresh_cli_status()
+        message = ("CLI installed. Try neo --help in a terminal." if status.on_path else
+                   "CLI installed. Settings → Command-line tool shows how to run it.")
+        self.toasts.show_toast(message, "success")
+        self.state.log_activity(f"Command-line tool available at {status.path}")
+        return True
 
     # ------------------------------------------------------------------- auth
     def open_login(self) -> None:
