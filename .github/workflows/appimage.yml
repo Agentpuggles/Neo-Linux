@@ -37,10 +37,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: pip
@@ -77,7 +77,7 @@ jobs:
           packaging/ci-check.sh make check PYTHON=build/appimage/venv/bin/python RUFF=build/appimage/venv/bin/ruff
       - name: Qt widget, prompt, and desktop integration tests
         run: packaging/ci-check.sh make test-gui GUI_PYTHON="$PWD/build/appimage/venv/bin/python"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: neo-appimage-x86_64
           path: |
@@ -97,8 +97,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: neo-appimage-x86_64
           path: release
