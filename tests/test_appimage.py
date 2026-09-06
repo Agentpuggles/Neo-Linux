@@ -1,5 +1,6 @@
 """Offline release/runtime regressions. No Qt, network, FUSE or real user data."""
 
+import configparser
 import hashlib
 import importlib.util
 import io
@@ -172,6 +173,25 @@ class TestDurableDesktopCommand(unittest.TestCase):
 
 
 class TestReleaseInputs(unittest.TestCase):
+    def test_desktop_metadata_supports_the_release_build_baseline(self):
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(support.REPO_ROOT / "packaging/dev.neofn.NeoLauncher.desktop")
+        entry = parser["Desktop Entry"]
+        self.assertEqual(entry["Exec"], "neo-gui %u")
+        self.assertIn("x-scheme-handler/neolauncher", entry["MimeType"])
+        # Ubuntu 22.04's validator rejects this newer, optional key.
+        self.assertNotIn("SingleMainWindow", entry)
+
+    @unittest.skipUnless(shutil.which("desktop-file-validate"), "desktop-file-utils not installed")
+    def test_packaged_desktop_file_passes_native_validation(self):
+        result = subprocess.run(
+            ["desktop-file-validate", str(support.REPO_ROOT / "packaging/dev.neofn.NeoLauncher.desktop")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_release_version_is_the_actual_backend_version(self):
         self.assertEqual(packaging.version(), support.neo.VERSION)
 

@@ -100,6 +100,12 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
 
 ### Fixed
 
+- **AppImage builds failed desktop-entry validation on Ubuntu 22.04.** Removed
+  the newer `SingleMainWindow` hint from packaged and generated desktop entries;
+  the app's existing single-instance handler is unchanged. Native validation stays
+  enabled. CI failure annotations now retain the final exception within GitHub's
+  length limit instead of truncating it behind build progress output.
+
 - **The desktop app ignored every mouse click.** `ToastHost` is stretched over the whole
   window so notifications can be positioned freely, and it accepted mouse events, so it
   won hit-testing everywhere and each click landed on the overlay instead of the button

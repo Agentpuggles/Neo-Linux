@@ -904,6 +904,13 @@ class TestPlatformIntegration(unittest.TestCase):
                 parser.read(path)
                 entry = parser["Desktop Entry"]
                 self.assertEqual(entry["Type"], "Application")
+                self.assertNotIn("SingleMainWindow", entry)
+                import shutil
+                import subprocess
+                validator = shutil.which("desktop-file-validate")
+                if validator:
+                    result = subprocess.run([validator, str(path)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(entry["Icon"], plat.APP_ID)
                 self.assertEqual(
                     entry["StartupWMClass"],

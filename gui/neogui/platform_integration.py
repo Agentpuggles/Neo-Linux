@@ -142,6 +142,8 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 # ------------------------------------------------------- desktop integration
+# Keep keys compatible with the Ubuntu 22.04 release baseline. Single-instance
+# behaviour is enforced in app.py, not via the newer SingleMainWindow hint.
 DESKTOP_FILE = f"""[Desktop Entry]
 Type=Application
 Version=1.0
@@ -158,7 +160,6 @@ StartupNotify=true
 StartupWMClass={APP_ID}
 MimeType=x-scheme-handler/neolauncher;
 X-GNOME-UsesNotifications=true
-SingleMainWindow=true
 """
 
 
