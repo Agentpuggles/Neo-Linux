@@ -43,6 +43,10 @@ class ServiceStatus:
     prism_banned: bool | None = None
     prism_reason: str = ""
     fortnite_access: bool | None = None
+    # granted | denied | open | unknown — "open" is the post-launch service no
+    # longer publishing a per-account gate (the endpoint 404s), which is not a
+    # denial and must not gray out Play. See neo.ACCESS_* / protocol.md §11.2.
+    access_gate: str = "unknown"
     entitlements: str = ""
     checked_at: datetime | None = None
     error: str = ""
@@ -50,6 +54,32 @@ class ServiceStatus:
     @property
     def up(self) -> bool:
         return self.status.upper() == "UP"
+
+    @property
+    def access_denied(self) -> bool:
+        """Only an explicit `false` from the gate blocks play."""
+        return self.access_gate == "denied"
+
+    @property
+    def access_ok(self) -> bool:
+        return self.access_gate in ("granted", "open")
+
+    @property
+    def access_label(self) -> str:
+        return {"granted": "Granted", "denied": "Not granted",
+                "open": "Open"}.get(self.access_gate, "Unknown")
+
+    @property
+    def access_tone(self) -> str:
+        return {"granted": "success", "open": "success",
+                "denied": "warning"}.get(self.access_gate, "muted")
+
+    @property
+    def access_note(self) -> str:
+        return {
+            "denied": "NeoFN has not enabled play for this account yet.",
+            "open": "Play is no longer gated per account.",
+        }.get(self.access_gate, "")
 
     @property
     def tone(self) -> str:

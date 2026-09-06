@@ -51,7 +51,23 @@ login → pick build → manifest → parallel chunk download → zlib + SHA-1 v
 
 ## Status
 
-Current release: **v0.5.5**.
+Current release: **v0.5.6**.
+
+> ### 🎉 NeoFN has launched — and `neo` plays it on Linux
+>
+> **Matches played on Linux through this launcher on 2026-09-05**, start to
+> finish: `neo install` → `neo launch` (and the desktop app), Proton via umu-run,
+> into real games. The `PLAY` entitlement wall that every earlier release
+> documented is gone, so nothing here waits on the service any more.
+>
+> Two things changed server-side on launch day, and `neo` v0.5.6 reads both
+> correctly — see [Troubleshooting](#troubleshooting) if an older build is
+> showing them as errors:
+>
+> - the per-account gate `…/fortniteAccess` now answers **404** for accounts
+>   that are not gated (it is an *open* gate, not a denial);
+> - **store entitlements stay empty unless you have bought something** — they
+>   record purchases, never playtime.
 
 | Feature | State |
 | --- | --- |
@@ -62,17 +78,15 @@ Current release: **v0.5.5**.
 | Install / verify / reinstall with a relocatable cache | ✅ |
 | Targeted repair — only broken files re-fetched (`neo verify --repair`) | ✅ |
 | Import an existing build folder, no re-download (`neo import`) | ✅ |
-| Access watch with desktop notification (`neo status --watch`) | ✅ |
+| Access watch with desktop notification (`neo status --watch`) | ✅ exits straight away now that play is ungated |
 | Launcher news in the terminal (`neo news`) | ✅ |
 | Install-time disk preflight (cache + target checked before bytes move) | ✅ |
-| Friends roster + presence over XMPP (`neo friends`) | ✅ |
+| Friends roster + presence over XMPP (`neo friends`) | ✅ live-validated 2026-08-30 end to end: subprotocol, SASL PLAIN, bind, session, roster iq, presence echo |
 | Prism asset management (sha256-verified, auto-updated) | ✅ |
 | Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
 | Game modifiers (Edit On Release, Instant Reset, Disable Pre-Edit) | ✅ `-NeoModifiers=` JSON, same payload as the Windows Options panel |
-| Playing | ⏳ waits on NeoFN granting account access + the `PLAY` entitlement (private testing as of v0.3.0) |
-
-✅ live-validated 2026-08-30 against production, end to end: subprotocol, SASL PLAIN, bind, session, roster iq, presence echo. Rendering with a non-empty roster awaits someone to befriend once the service leaves private testing.
-| Store / early-access entitlement visibility (`neo status`) | ✅ |
+| Store / early-access entitlement visibility (`neo status`) | ✅ purchases only — an unbought account correctly shows none |
+| **Playing** | ✅ **matches played on Linux, 2026-09-05** |
 
 ## Requirements
 
@@ -138,7 +152,7 @@ neo <command> [options]
 | `neo whoami` | Display name, account id and email for the current session. |
 | `neo setup [name]` | With no name: shows first-run setup status. With a name: checks availability, then sets the display name. |
 | `neo logout` | Drops the stored session (`auth.json` is emptied, not deleted). |
-| `neo status` | Lightswitch service status, ban status (both services), `fortniteAccess`, store entitlements, players online. `--watch` keeps polling until access is granted, then fires a desktop notification — the Windows launcher checks once per start and never re-checks, so this beats it to the punch. `--interval N` sets the period (min 10 s). |
+| `neo status` | Lightswitch service status, ban status (both services), play access, store entitlements, players online. Play access has three answers: `granted`, `not granted`, or `open` — the last one meaning NeoFN no longer gates play per account (the endpoint 404s), which is what a launched service looks like. `--json` dumps the raw payloads behind the summary. `--watch` polls until access opens up and fires a desktop notification; `--interval N` sets the period (min 10 s). |
 | `neo news` | Launcher news from the content service (`--json` for the raw payload). |
 | `neo friends` | Roster with display names and live presence, speaking the official client's own XMPP-over-websocket protocol (protocol.md §12): SASL PLAIN with the account id + access token, official bind resource. `--wait N` presence window, `--verbose` prints the raw stanzas. Falls back to the friends REST API when the websocket is unreachable. `NEO_XMPP` overrides the endpoint. |
 
@@ -346,6 +360,9 @@ manifest, a `build-appimage.sh` for a portable build, and the freedesktop
 
 | Symptom | Fix |
 | --- | --- |
+| `neo status` warns `fortniteAccess -> HTTP 404` | An older `neo` (≤ 0.5.5) treating the launched service as an error. Since launch that route is unpublished for ungated accounts; v0.5.6 prints `Play access : open` instead. Update, and see [protocol.md §11.2](docs/protocol.md#112-playability-gates). |
+| `Entitlements: none on file` although you play daily | Correct, and not a bug: entitlements record **store purchases** (early access, supporter tiers), never playtime. `neo status --json` shows the raw payload the store returned. |
+| `make run-gui` logs `Failed to register with host portal … App info not found for 'dev.neofn.NeoLauncher'` | Harmless Qt/xdg-desktop-portal chatter when the app runs from a checkout with no installed desktop entry. Silence it with `neo-gui --install-desktop-entry` (or `make install-all`). |
 | Login callback didn't fire | Copy the whole `neolauncher://callback/auth?code=…` URL from the address bar and pass it to `neo login --callback '<url>'`. Codes are single-use and expire quickly — when in doubt, `neo login` again. |
 | CDN returns 403 | R2 rejects some default user agents; `neo` sends its own. If you're behind a proxy or VPN, try without it. |
 | Chunk downloads fail with 404 | The CDN edge transiently 404s objects that exist; `neo` retries with backoff. A hard failure names the chunk GUID. |

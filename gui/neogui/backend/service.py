@@ -347,7 +347,10 @@ class NeoService:
         with contextlib.suppress(Exception):
             oc = n.jhttp("GET", n.LAUNCHER + "/api/public/onlinecount")
             if isinstance(oc, dict):
-                oc = next((v for v in oc.values() if isinstance(v, int)), None)
+                # a per-service map: {"fortnite": 240, "launcher": 402} — the
+                # game's own number is the one worth showing.
+                counts = {k: v for k, v in oc.items() if isinstance(v, int)}
+                oc = counts.get("fortnite", next(iter(counts.values()), None))
             if isinstance(oc, int):
                 out.players_online = oc
 
@@ -357,7 +360,11 @@ class NeoService:
                 out.prism_banned = bool(b.get("banned"))
                 out.prism_reason = str(b.get("reason") or "")
             with contextlib.suppress(Exception):
-                out.fortnite_access = bool(n.fortnite_access(self.auth()))
+                state, _payload = n.fortnite_access_state(self.auth())
+                out.access_gate = state
+                out.fortnite_access = (
+                    None if state == n.ACCESS_OPEN else state == n.ACCESS_GRANTED
+                )
             with contextlib.suppress(Exception):
                 out.entitlements = n.describe_entitlements(n.store_entitlements(self.auth()))
         return out

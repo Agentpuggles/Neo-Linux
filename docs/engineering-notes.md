@@ -39,6 +39,7 @@ Each note below is a failure that cost real time, the diagnosis that ended it, a
 | 13 | [13. Corrections and follow-ups](#13-corrections-and-follow-ups) | the ledger of what we got wrong, kept in the open |
 | 14 | [14. Wine "unimplemented function" abort — the Proton build, not the prefix](#14-wine-unimplemented-function-abort--the-proton-build-not-the-prefix) | a Wine API you expect to exist aborting means that Proton build is broken — switch Proton, not prefix |
 | 15 | [15. "Edit On Release" was never a UE4 flag](#15-edit-on-release-was-never-a-ue4-flag) | the 12-flag LaunchAsync vector is not the whole launch — Options live in a different method |
+| 16 | [16. Launch day: a 404 that meant "you're in"](#16-launch-day-a-404-that-meant-youre-in) | when a service leaves testing, the endpoint that said "not yet" disappears — a 404 gate is an open gate |
 | — | [Validated results (for the record)](#validated-results-for-the-record) | the measured numbers, on the hardware this was built against |
 | — | [Appendix: environment quirks that shaped the work](#appendix-environment-quirks-that-shaped-the-work) | the small, real gotchas that cost hours |
 
@@ -429,6 +430,51 @@ different helper; grep the web bundle for the label users actually see.
 
 ---
 
+## 16. Launch day: a 404 that meant "you're in"
+
+**Symptom.** The service went public, matches were played on Linux through `neo`
+— and `neo status` still looked wrong:
+
+```
+⚠ fortniteAccess: GET …/account/{id}/fortniteAccess -> HTTP 404:
+Entitlements     : none on file
+Players online   : {'fortnite': 240, 'launcher': 402}
+```
+
+Three complaints in five lines from a launcher that was, at that moment, working
+perfectly.
+
+**Diagnosis.** Each line was a different flavour of the same mistake — a
+pre-launch assumption hardcoded into the *display* layer.
+
+1. The play gate was written as a boolean: `true` or `false`, anything else an
+   error. Post-launch the account service stopped publishing it for ungated
+   accounts, so it answers `404` — which under the old code was the loudest of
+   the three states, despite meaning "nothing is gating you". `neo launch` never
+   consulted the gate, which is why the game ran while the status line
+   complained.
+2. Entitlements record *purchases*. Playing is not a purchase, so `none on file`
+   was correct — but indistinguishable from "we could not read the payload",
+   because an unrecognised shape fell through the same branch.
+3. The online count was interpolated straight into an f-string, so a perfectly
+   good per-service map rendered as a Python dict literal.
+
+**Resolution.** The gate is tri-state (`granted` / `denied` / `open`), 404 maps
+to *open*, and only an explicit `false` blocks anything — in the CLI and in the
+GUI's `ServiceStatus.access_gate`, which previously grayed the Play hero on
+"Unknown". `jhttp` raises `HttpError` carrying `.status`, so this is a status
+check rather than a regex over an error message. Empty entitlements now carry
+the reason; unrecognised payloads report their keys. The count is formatted.
+`neo status --json` prints the raw payloads for the next time a summary is the
+thing that is wrong.
+
+**Lesson.** A boolean gate has three answers: yes, no, and *the question no
+longer applies*. When a service leaves testing, the endpoints that existed to
+say "not yet" are the first ones to disappear — treat their absence as good
+news, and never let a display bug tell a working user they are broken.
+
+---
+
 ## Validated results (for the record)
 
 | milestone | evidence |
@@ -441,7 +487,8 @@ different helper; grep the web bundle for the label users actually see.
 | Resume | interrupted install re-run picks up cached chunks instantly |
 | Auth | Discord SSO end-to-end on target hardware; session refresh; kill-others 204 |
 | Launch | Proton boot → game window; in-game auto-login as the correct account; prism redirection confirmed from inside the game |
-| Blocker | server-side PLAY entitlement (pre-launch), not launcher-side |
+| Blocker | none — the server-side PLAY entitlement lifted at launch |
+| Playing | matches played on Linux through `neo` (CLI and desktop app), 2026-09-05 |
 
 ## Appendix: environment quirks that shaped the work
 

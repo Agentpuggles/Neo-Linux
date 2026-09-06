@@ -43,6 +43,8 @@ side by side.
 | 11 | The web UI checks `fortniteAccess` **once per start**; the refresh event is never re-dispatched — a grayed Launch button needs a launcher restart | [11.2](#112-playability-gates) |
 | 12 | The public-build allowlist (`["10.40"]`) is baked into **both** the DLL and the web bundle — a new public build ships as a launcher update | [11.2](#112-playability-gates) |
 | 13 | Gameplay toggles (Edit On Release, Instant Reset, Disable Pre-Edit) are **not** UE4 flags — they ride `-NeoModifiers=<json>` produced by `EncodeGameModifiers` | [8.2](#82-game-modifiers--neomodifiers) |
+| 14 | Since the public launch `fortniteAccess` **404s for ungated accounts** — a 404 is an open gate, not a denial | [11.2](#112-playability-gates) |
+| 15 | Store entitlements record **purchases only** — playing the game never creates one, so `none on file` on a played account is correct | [11.3](#113-store-entitlements) |
 
 ---
 
@@ -132,6 +134,9 @@ POST api/public/account/setup        JSON {"displayName": "…"}   → the accou
 GET api/public/account/{accountId}
 GET api/public/account/{accountId}/fortniteAccess        ← the play-access gate
 ```
+
+`fortniteAccess` returns `true`, `false` — or, since the public launch, `404`
+for accounts that are not gated at all ([§11.2](#112-playability-gates)).
 
 ### 2.6 Exchange codes (game auth, every launch)
 
@@ -450,6 +455,10 @@ so a grant that lands mid-boot is still caught without a relaunch. Diff a new
 log against the pre-launch baseline (`neo log > baseline`) and those three
 absences are the whole signal.
 
+**Tripwire fired (2026-09-05).** The service launched: the three lines above are
+gone from a live boot and matches have been played on Linux through `neo`. The
+baseline is kept here as the record of what a *withheld* entitlement looks like.
+
 ## 10. Known ambiguities
 
 The format leaves a few places where a value's encoding can only be guessed from its
@@ -510,6 +519,20 @@ comparisons, no countdown code):
    re-dispatches the refresh event, so a grayed Launch button stays gray until
    the launcher restarts (see gotcha 11). `neo launch` never consults this
    gate — `neo status` prints it.
+
+   **Post-launch (observed 2026-09-05): the route now answers `404`.** With the
+   service public, the gate is simply no longer published for ungated accounts —
+   accounts that play normally get a 404 here, not `true`. So the gate has three
+   answers, not two, and a 404 is neither an error nor a denial:
+
+   | Response | Meaning | `neo status` |
+   | --- | --- | --- |
+   | `true` | explicitly granted | `granted` |
+   | `false` | explicitly denied — the client refuses to launch | `not granted` |
+   | `404` | no per-account gate on this account (post-launch default) | `open` |
+
+   Anything else (401, 5xx, no route to host) is *unknown* and is reported as a
+   warning — only an explicit `false` should ever gray out a Launch button.
 2. **Baked-in build allowlist.** `PublicBuildVersions = ["10.40"]`, with a
    3-account `DeveloperAccountIds` override, is hardcoded in *both* the DLL and
    the web bundle (`const eM=["10.40"]`). Installing anything else is refused:
@@ -537,6 +560,14 @@ case-insensitively); purchases — early access, supporter tiers — land here a
 paid orders, and the launcher derives an account tier from them
 (`getAccountTier`). `neo status` (v0.3.0) prints a one-line summary so a
 purchase can be watched registering on the account without the Windows client.
+
+**Entitlements are purchases, not playtime.** Nothing about installing, launching
+or playing writes to this endpoint, so an account that plays every day and has
+bought nothing correctly reads `none on file` — it is not evidence of a broken
+call. Two shapes have been seen besides the documented one (a bare array of
+entitlement objects, and the payload wrapped in `data`), so `neo` unwraps and
+summarises both; an unrecognised *non-empty* payload is reported with its keys
+rather than being flattened into "none on file".
 
 ### 11.4 WebView2 bridge (selected commands)
 

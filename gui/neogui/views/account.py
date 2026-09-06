@@ -187,13 +187,11 @@ class AccountView(View):
         rows = [
             (
                 "Game access",
-                "Granted" if status.fortnite_access else
-                ("Not granted" if status.fortnite_access is False else "Unknown"),
-                "success" if status.fortnite_access else
-                ("warning" if status.fortnite_access is False else "muted"),
-                "" if status.fortnite_access else
-                "NeoFN enables play per account. During private testing this stays "
-                "off until they grant it.",
+                status.access_label,
+                status.access_tone,
+                status.access_note
+                or ("The service no longer publishes a per-account play gate."
+                    if status.access_gate == "open" else ""),
             ),
             (
                 "Service ban",
@@ -212,8 +210,12 @@ class AccountView(View):
             (
                 "Store entitlements",
                 status.entitlements or "None on file",
-                "info" if status.entitlements else "muted",
-                "",
+                "info" if status.entitlements and status.entitlements != "none on file"
+                else "muted",
+                "Purchases (early access, supporter tiers) land here — playing the "
+                "game does not create entitlements."
+                if not status.entitlements or status.entitlements == "none on file"
+                else "",
             ),
             ("Session", expiry, "muted", ""),
         ]

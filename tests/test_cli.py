@@ -240,8 +240,83 @@ class TestLaunchArgumentForwarding(CliTestCase):
         self.assertEqual(args.extra, ["-windowed"])  # argparse drops the separator
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestStatusOutput(CliTestCase):
+    """What `neo status` prints for a live, launched service."""
+
+    def status_output(self, *, access, entitlements, extra_args=None):
+        import argparse
+        import io
+        from unittest import mock
+
+        auth = neo.Auth()
+        auth.d = {"account_id": "ACCOUNT", "refresh_token": "R", "access_token": "A",
+                  "display_name": "n", "access_expires_at": None}
+
+        def fake_jhttp(method, url, body=None, headers=None, timeout=60):
+            if url.endswith("/token"):
+                return {"access_token": "T"}
+            if "lightswitch" in url:
+                return {"status": "UP", "message": "Fortnite is UP",
+                        "banned": False, "allowedActions": ["PLAY", "DOWNLOAD"]}
+            if "ban-status" in url:
+                return {"banned": False}
+            if url.endswith("/fortniteAccess"):
+                if isinstance(access, Exception):
+                    raise access
+                return access
+            if "entitlements" in url:
+                return entitlements
+            if "onlinecount" in url:
+                return {"fortnite": 240, "launcher": 402}
+            return {}
+
+        args = argparse.Namespace(watch=False, interval=60, json=False)
+        for key, value in (extra_args or {}).items():
+            setattr(args, key, value)
+        with mock.patch.object(neo, "jhttp", fake_jhttp), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            neo.cmd_status(args, auth)
+        return out.getvalue()
+
+    def test_a_404_gate_reads_as_open_not_as_an_error(self):
+        # the account service stopped publishing the per-account gate after the
+        # public launch: an account that plays fine must not see a warning
+        output = self.status_output(
+            access=neo.HttpError("GET", "https://x/fortniteAccess", 404, b""),
+            entitlements={},
+        )
+        self.assertIn("Play access      : open", output)
+        self.assertNotIn("⚠", output)
+        self.assertNotIn("HTTP 404", output)
+
+    def test_a_granted_gate_still_says_granted(self):
+        output = self.status_output(access=True, entitlements={"ownedOfferIds": ["5"]})
+        self.assertIn("Play access      : granted", output)
+        self.assertIn("offers 5", output)
+
+    def test_a_denied_gate_says_why(self):
+        output = self.status_output(access=False, entitlements={})
+        self.assertIn("not granted", output)
+
+    def test_an_empty_entitlement_payload_explains_itself(self):
+        output = self.status_output(access=True, entitlements={})
+        self.assertIn("none on file", output)
+        self.assertIn("playing the game does not create any", output)
+
+    def test_allowed_actions_and_online_counts_are_readable(self):
+        output = self.status_output(access=True, entitlements={})
+        self.assertIn("Allowed actions  : PLAY, DOWNLOAD", output)
+        self.assertIn("Players online   : fortnite 240 · launcher 402 (total 642)", output)
+        self.assertNotIn("{'fortnite'", output)
+
+    def test_json_dumps_the_raw_payloads(self):
+        output = self.status_output(
+            access=True, entitlements={"ownedOfferIds": ["5"]}, extra_args={"json": True}
+        )
+        blob = json.loads(output[output.index("{"):])
+        self.assertEqual(blob["fortniteAccess"], True)
+        self.assertEqual(blob["entitlements"], {"ownedOfferIds": ["5"]})
+        self.assertEqual(blob["onlineCount"], {"fortnite": 240, "launcher": 402})
 
 
 class TestStatusWatch(CliTestCase):
@@ -323,6 +398,37 @@ class TestStatusWatch(CliTestCase):
             neo.cmd_status(argparse.Namespace(watch=True, interval=10), auth)
         self.assertIn("fortniteAccess: False", out.getvalue())
         notified.assert_not_called()
+
+    def test_watch_stops_immediately_when_the_gate_is_retired(self):
+        import argparse
+        import io
+        from unittest import mock
+
+        auth = neo.Auth()
+        auth.d = {"account_id": "ACCOUNT", "refresh_token": "R", "access_token": "A",
+                  "display_name": "n", "access_expires_at": None}
+
+        def fake_jhttp(method, url, body=None, headers=None, timeout=60):
+            if url.endswith("/token"):
+                return {"access_token": "T"}
+            if "lightswitch" in url:
+                return {"status": "UP", "banned": False}
+            if "ban-status" in url:
+                return {"banned": False}
+            if url.endswith("/fortniteAccess"):
+                raise neo.HttpError("GET", url, 404, b"")
+            return {}
+
+        def never(_seconds):
+            raise AssertionError("--watch slept on a gate that no longer exists")
+
+        with mock.patch.object(neo, "jhttp", fake_jhttp), \
+                mock.patch.object(neo, "notify") as notified, \
+                mock.patch.object(neo.time, "sleep", never), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            neo.cmd_status(argparse.Namespace(watch=True, interval=10, json=False), auth)
+        self.assertIn("nothing to wait for", out.getvalue())
+        notified.assert_called_once()
 
 
 class TestUninstall(CliTestCase):
@@ -625,3 +731,7 @@ class TestProtonResolution(CliTestCase):
     def test_config_command_persists_proton(self):
         support.run_cli("config", "proton", "GE-Proton")
         self.assertEqual(self.read_config()["proton"], "GE-Proton")
+
+
+if __name__ == "__main__":
+    unittest.main()

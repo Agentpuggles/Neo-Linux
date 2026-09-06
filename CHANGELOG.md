@@ -152,6 +152,59 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
 - The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
   existed (no tags in this repository).
 
+## [0.5.6] — 2026-09-05
+
+**NeoFN launched, and `neo` played it on Linux** — install → launch → real
+matches, through umu-run/Proton, from both the CLI and the desktop app. The
+service changed two things on the way out of private testing, and this release
+reads both of them correctly instead of reporting them as failures.
+
+### Fixed
+
+- **`fortniteAccess` 404 is an open gate, not an error.** With play no longer
+  gated per account, `GET …/account/{id}/fortniteAccess` answers `404` for
+  ungated accounts, and `neo status` printed
+  `⚠ fortniteAccess: … -> HTTP 404` beside an account that plays fine. The gate
+  is now tri-state — `granted` / `not granted` / `open` — and only an explicit
+  `false` counts as a denial. Anything else (401, 5xx, unreachable) stays
+  `unknown` and is still reported. `neo status --watch` exits immediately on an
+  open gate rather than polling a route that no longer exists.
+- **The desktop app no longer grays out Play on a retired gate.** `ServiceStatus`
+  carries the gate state (`access_gate`, with `access_ok` / `access_denied` /
+  `access_label`), so the Play hero, the nav-rail chip, Diagnostics and Account
+  all read "open" as playable. Previously a 404 fell into "Unknown", which
+  showed as *No game access*.
+- **"Entitlements: none on file" now says what it means.** Entitlements record
+  store purchases, never playtime, so an empty payload on a played account is
+  correct — `neo status` says so in a follow-up line instead of leaving it
+  looking like a lost purchase. The summary also handles the two other payload
+  shapes seen in the wild (a bare array, and a `data`-wrapped object), and an
+  unrecognised *non-empty* payload now reports its keys rather than claiming the
+  account owns nothing.
+- **Players online is legible.** `Players online : {'fortnite': 240, 'launcher':
+  402}` (a raw Python dict) is now
+  `Players online : fortnite 240 · launcher 402 (total 642)`; the GUI's single
+  number prefers the game's count over the launcher's instead of whichever key
+  came first.
+- `neo status` prints `allowedActions` as a comma-separated list rather than a
+  Python list literal.
+
+### Added
+
+- `neo status --json` — the raw lightswitch, prism, gate, entitlement and
+  online-count payloads after the summary, for when the summary is not what you
+  want to argue with.
+- `HttpError` (a `RuntimeError` subclass carrying `.status`, `.url`, `.method`,
+  `.body`) is raised by `jhttp`, with `http_status(exc)` to read a status back
+  out of any exception. The message text is unchanged, so nothing that only
+  prints an error notices. This is what lets 404 be distinguished from "the
+  service is broken" instead of matching on message strings.
+- Tests for all of the above: the tri-state gate, the 404-is-open rule, the
+  entitlement shapes, the online-count line, `--json`, `--watch` on an open
+  gate, and the GUI's status mapping (16 new).
+- `docs/protocol.md` §2.5/§11.2/§11.3 record the post-launch behaviour, with
+  gotchas 14 and 15 in the at-a-glance table.
+
 ## [0.5.5] — 2026-08-30
 
 ### Fixed
@@ -392,6 +445,11 @@ Internal first cut; never released, so no tag or diff exists for it.
 
 ## Known issues
 
-- Playing still depends on NeoFN granting the `PLAY` entitlement; `neo launch` boots the
-  client and logs it in, but the game stops at the entitlement check
-  ([README → Status](README.md#status)).
+- Nothing blocking. NeoFN launched on 2026-09-05 and matches have been played on
+  Linux through `neo` end to end ([README → Status](README.md#status)); the
+  `PLAY` entitlement wall that gated every earlier release is gone.
+- Running the desktop app from a checkout (`make run-gui`) logs
+  `Failed to register with host portal … App info not found for
+  'dev.neofn.NeoLauncher'`. It is xdg-desktop-portal noticing there is no
+  installed desktop entry for the app id; it affects nothing. Install the entry
+  (`neo-gui --install-desktop-entry`, or `make install-all`) to silence it.
