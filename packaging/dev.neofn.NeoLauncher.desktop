@@ -14,4 +14,3 @@ StartupNotify=true
 StartupWMClass=dev.neofn.NeoLauncher
 MimeType=x-scheme-handler/neolauncher;
 X-GNOME-UsesNotifications=true
-SingleMainWindow=true

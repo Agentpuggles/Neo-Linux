@@ -110,7 +110,9 @@ class TestInvocation(CliTestCase):
     def test_top_level_usage_is_compact(self):
         # the stock `{login,whoami,…}` choice list wraps on any real terminal
         text = support.run_cli("--help")
-        self.assertIn("usage: neo <command> [options]", text)
+        self.assertIn("usage: neo [command] [options]", text)
+        self.assertIn("no arguments to open the desktop app", " ".join(text.split()))
+        self.assertIn("Terminal commands work without PySide6", text)
         self.assertNotIn("{login,", text)
 
     def test_install_help_documents_its_positionals(self):
@@ -144,9 +146,13 @@ class TestInvocation(CliTestCase):
     def test_unknown_command_exits_2(self):
         support.run_cli("frobnicate", expect_rc=2)
 
-    def test_bare_invocation_asks_for_a_command(self):
-        text = support.run_cli(expect_rc=2)
-        self.assertIn("the following arguments are required", text)
+    def test_bare_invocation_without_a_desktop_explains_terminal_usage(self):
+        text = support.run_cli(
+            expect_rc=1, env={"DISPLAY": "", "WAYLAND_DISPLAY": "", "QT_QPA_PLATFORM": ""}
+        )
+        self.assertIn("no graphical session", text)
+        self.assertIn("neo --help", text)
+        self.assertNotIn("Traceback", text)
 
 
 class TestGatedCommands(CliTestCase):

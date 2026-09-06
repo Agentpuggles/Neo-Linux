@@ -1,7 +1,7 @@
 version: 2
 updates:
-  # The launcher has no dependencies to update — the workflow files are the only
-  # third-party code that runs on our behalf, so those get the refresh.
+  # Keep workflow actions current. AppImage dependencies/tool hashes are reviewed
+  # together with their license references; see docs/appimage.md.
   - package-ecosystem: github-actions
     directory: /
     schedule:

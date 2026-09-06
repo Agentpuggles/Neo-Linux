@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..backend.cli_tool import RECOMMENDATION
 from ..backend.errors import NeoError
 from ..platform_integration import (
     APP_ID,
@@ -84,7 +85,7 @@ class PathField(QWidget):
 
 class SettingsView(View):
     title = "Settings"
-    subtitle = "Neo shares these settings with the command-line launcher."
+    subtitle = "Neo shares these settings with the optional command-line tool."
     max_content_width = 900
 
     def __init__(self, ctx, parent=None) -> None:
@@ -99,6 +100,7 @@ class SettingsView(View):
         self.add_header_action(self.config_btn)
 
         self.body.addWidget(self._general())
+        self.body.addWidget(self._cli_tool())
         self.body.addWidget(self._appearance())
         self.body.addWidget(self._game())
         self.body.addWidget(self._launch())
@@ -161,6 +163,38 @@ class SettingsView(View):
             )
         )
         return card
+
+    def _cli_tool(self) -> Card:
+        card = Card()
+        card.add(SectionHeader("Command-line tool", "Optional, but highly recommended."))
+        card.add(hline())
+        card.add(label(RECOMMENDATION, "small", wrap=True))
+        self.cli_note = selectable(label("", "small", wrap=True))
+        card.add(self.cli_note)
+        self.cli_install_btn = Button(
+            "Install CLI", self.theme, "download", variant="primary",
+            on_click=self.ctx.install_cli,
+            tooltip="Install the optional neo terminal command for your user account",
+        )
+        card.add(self.cli_install_btn)
+        return card
+
+    def refresh_cli_status(self) -> None:
+        status = self.service.cli_status()
+        self.cli_install_btn.setEnabled(not status.installed)
+        self.cli_install_btn.setText("CLI installed" if status.installed else "Install CLI")
+        if status.installed:
+            text = f"Installed at {status.path}\nTry in a terminal: {status.help_command}"
+            if not status.on_path:
+                text += ("\nTo use the short neo command, add this folder to your shell's PATH "
+                         "and check for another command named neo. Neo does not edit your shell profile.")
+        elif status.conflict:
+            text = (f"{status.path} already exists and is not a recognised Neo CLI. "
+                    "Nothing will be overwritten. Check that file before installing; "
+                    "you can keep using the GUI without the CLI.")
+        else:
+            text = f"Not installed. Installs to {status.path} for your user account — no sudo needed."
+        self.cli_note.setText(text)
 
     def _appearance(self) -> Card:
         card = Card()
@@ -437,6 +471,7 @@ class SettingsView(View):
             self._loading = False
 
         self._render_cache(self.state.cache)
+        self.refresh_cli_status()
         self._render_integration()
         self._render_paths()
         self.advanced_card.setVisible(bool(cfg.get("gui_advanced_mode")))

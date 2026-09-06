@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# The runtime sets APPIMAGE to the durable image and APPDIR to its mount.
+# Keep PATH untouched: umu and desktop tools must come from the host.
+set -eu
+HERE=$(dirname "$(readlink -f "$0")")
+export APPDIR="$HERE"
+export NEO_BIN="${NEO_BIN:-$HERE/usr/bin/_internal/neo}"
+# A frozen OpenSSL may have build-distro trust paths. Use the host's current
+# trust store, never turn off TLS verification or replace an explicit override.
+if [ "${SSL_CERT_FILE+x}" != x ] && [ "${SSL_CERT_DIR+x}" != x ]; then
+    for certs in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+                 /etc/ssl/cert.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+        if [ -r "$certs" ]; then
+            export SSL_CERT_FILE="$certs"
+            break
+        fi
+    done
+fi
+exec "$HERE/usr/bin/neo-gui" "$@"

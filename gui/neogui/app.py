@@ -121,12 +121,20 @@ def main(argv: list | None = None) -> int:
     if url and not url.startswith("neolauncher://"):
         url = ""
 
+    if args.self_check:
+        # This mode must be deterministic/offline, including background jobs.
+        # It exits the process afterwards; an audit hook cannot be removed.
+        def offline(event, _args):
+            if event in ("socket.connect", "socket.getaddrinfo"):
+                raise OSError("Network disabled during Neo's self-check")
+        sys.addaudithook(offline)
+
     configure_application_identity()
     app = QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)  # the tray may keep us alive
     app.setWindowIcon(icons.app_icon())
 
-    if hand_off_to_running_instance(url):
+    if not args.self_check and hand_off_to_running_instance(url):
         return 0
 
     if args.theme:
@@ -135,15 +143,21 @@ def main(argv: list | None = None) -> int:
     try:
         service = NeoService()
     except LauncherNotFound as exc:
+        if args.self_check:
+            print(f"self-check: missing backend: {exc}", file=sys.stderr)
+            return 1
         return fatal(
             app,
-            "Neo launcher not found",
-            "Neo's desktop client is a front end for the `neo` launcher, and that "
-            "file could not be found on this system.",
+            "Neo backend not found",
+            "A required backend file is missing from the desktop installation. "
+            "The optional command-line tool is not required to use the GUI.",
             f"{exc}\n\nInstall it with:\n    make install\n\nor set NEO_BIN to the "
             "path of the `neo` file.",
         )
     except Exception as exc:  # pragma: no cover - defensive
+        if args.self_check:
+            print(f"self-check: backend import failed: {exc}", file=sys.stderr)
+            return 1
         return fatal(
             app,
             "Neo could not start",
@@ -154,6 +168,9 @@ def main(argv: list | None = None) -> int:
     from neogui.mainwindow import MainWindow
 
     window = MainWindow(service)
+    if args.self_check:
+        # Do not touch the live app's single-instance socket during a test.
+        return self_check(app, window)
 
     # Single-instance server: later invocations hand their URL over to us.
     QLocalServer.removeServer(SOCKET_NAME)
@@ -181,12 +198,12 @@ def main(argv: list | None = None) -> int:
     # Follow the desktop's light/dark preference while running.
     app.styleHints().colorSchemeChanged.connect(lambda *_: window.system_theme_changed())
 
-    if args.self_check:
-        return self_check(app, window)
-
     window.show()
     if url:
         QTimer.singleShot(300, lambda: window.handle_callback_url(url))
+    else:
+        # Never interrupt an OAuth callback or make --self-check interactive.
+        QTimer.singleShot(500, window.offer_cli_install)
 
     # Ctrl-C in a terminal should close the window, not wedge the event loop.
     signal.signal(signal.SIGINT, lambda *_: window.quit())
@@ -226,6 +243,18 @@ def self_check(app, window) -> int:
         except Exception as exc:
             failures.append(f"{key}: {type(exc).__name__}: {exc}")
             print(f"  FAIL  {key}: {exc}")
+
+    try:
+        from neogui.widgets.dialogs import CliInstallDialog
+        dialog = CliInstallDialog(window.ctx, str(window.service.cli_status().path))
+        dialog.show()
+        app.processEvents()
+        if dialog.grab().isNull():
+            raise RuntimeError("the optional CLI prompt rendered nothing")
+        dialog.reject()
+        print("  ok    optional CLI prompt (not installed)")
+    except Exception as exc:
+        failures.append(f"CLI prompt: {exc}")
 
     for mode in ("light", "dark"):
         try:

@@ -1,5 +1,5 @@
-# Development shortcuts for neo. Everything here is optional — the launcher itself
-# needs no build step. CI runs `make check`.
+# Development and installation shortcuts for Neo. The desktop app is the default;
+# terminal-only installs remain available with `make install-cli`.
 
 PYTHON ?= python3
 RUFF   ?= ruff
@@ -16,8 +16,8 @@ GUI_PYTHON  ?= $(if $(wildcard $(VENV_PYTHON)),$(VENV_PYTHON),$(PYTHON))
 .DEFAULT_GOAL := help
 
 .PHONY: help check check-gui lint lint-fix format test test-gui smoke smoke-gui \
-	dev dev-gui gui-python-check install install-gui install-all uninstall \
-	uninstall-all clean run-gui
+	dev dev-gui gui-python-check install install-cli install-gui install-all uninstall \
+	uninstall-cli uninstall-all clean run-gui appimage
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -43,7 +43,7 @@ test:  ## Offline unit tests for the CLI and the GUI backend (no Qt required)
 	$(PYTHON) -m unittest tests.test_gui_backend -v
 
 test-gui: gui-python-check  ## Qt tests, driven offscreen (needs PySide6; ~8 min)
-	QT_QPA_PLATFORM=offscreen $(GUI_PYTHON) -m unittest tests.test_gui_widgets -v
+	QT_QPA_PLATFORM=offscreen "$(GUI_PYTHON)" -m unittest tests.test_gui_widgets -v
 
 smoke:  ## Byte-compile and run the CLI the way a user would
 	$(PYTHON) -m py_compile neo
@@ -54,8 +54,8 @@ smoke:  ## Byte-compile and run the CLI the way a user would
 	@echo "smoke: ok"
 
 smoke-gui: gui-python-check  ## Import the desktop app and open every page once, headless
-	$(GUI_PYTHON) -m py_compile gui/neo-gui
-	QT_QPA_PLATFORM=offscreen $(GUI_PYTHON) gui/neo-gui --self-check
+	"$(GUI_PYTHON)" -m py_compile gui/neo-gui
+	QT_QPA_PLATFORM=offscreen "$(GUI_PYTHON)" gui/neo-gui --self-check
 
 dev:  ## Install the one dev dependency (ruff) into a venv
 	$(PYTHON) -m venv .venv
@@ -67,44 +67,55 @@ dev-gui: dev  ## Same, plus PySide6 so you can run the desktop app
 	@echo "the GUI targets (run-gui, test-gui, smoke-gui) now use .venv automatically"
 
 run-gui: gui-python-check  ## Run the desktop app from the checkout
-	NEO_BIN=$(CURDIR)/neo $(GUI_PYTHON) gui/neo-gui
+	NEO_BIN="$(CURDIR)/neo" "$(GUI_PYTHON)" gui/neo-gui
 
 # Fail with an instruction rather than a ModuleNotFoundError traceback.
 gui-python-check:
-	@$(GUI_PYTHON) -c 'import PySide6' 2>/dev/null || { \
+	@"$(GUI_PYTHON)" -c 'import PySide6' 2>/dev/null || { \
 		echo "PySide6 not found for $(GUI_PYTHON)."; \
 		echo "Run 'make dev-gui' to create .venv with PySide6, or install your"; \
 		echo "distro's package (e.g. pacman -S pyside6), or set GUI_PYTHON=..."; \
 		exit 1; }
 
-install:  ## Install the CLI into $(PREFIX)/bin
-	install -Dm755 neo $(DESTDIR)$(PREFIX)/bin/neo
+install: install-gui  ## Install the desktop app; offer the optional CLI in the GUI
 
-install-gui: install  ## Install the desktop app, its .desktop entry and icon
-	install -d $(DESTDIR)$(PREFIX)/share/neo
+install-cli:  ## Install only the stdlib command-line launcher
+	install -Dm755 neo "$(DESTDIR)$(PREFIX)/bin/neo"
+
+install-gui:  ## Install the desktop app, private backend, .desktop entry and icon
+	install -Dm644 neo "$(DESTDIR)$(PREFIX)/share/neo/neo"
 	# --exclude keeps __pycache__ out of the package: those .pyc files are
 	# stamped with the build machine's paths and Python version.
 	tar -c --exclude=__pycache__ --exclude='*.pyc' -C gui neogui \
-		| tar -x -C $(DESTDIR)$(PREFIX)/share/neo
-	install -Dm755 gui/neo-gui $(DESTDIR)$(PREFIX)/bin/neo-gui
+		| tar -x -C "$(DESTDIR)$(PREFIX)/share/neo"
+	install -Dm755 gui/neo-gui "$(DESTDIR)$(PREFIX)/bin/neo-gui"
 	install -Dm644 packaging/dev.neofn.NeoLauncher.desktop \
-		$(DESTDIR)$(PREFIX)/share/applications/dev.neofn.NeoLauncher.desktop
+		"$(DESTDIR)$(PREFIX)/share/applications/dev.neofn.NeoLauncher.desktop"
 	install -Dm644 packaging/dev.neofn.NeoLauncher.svg \
-		$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/dev.neofn.NeoLauncher.svg
+		"$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/dev.neofn.NeoLauncher.svg"
 	install -Dm644 packaging/dev.neofn.NeoLauncher.metainfo.xml \
-		$(DESTDIR)$(PREFIX)/share/metainfo/dev.neofn.NeoLauncher.metainfo.xml
+		"$(DESTDIR)$(PREFIX)/share/metainfo/dev.neofn.NeoLauncher.metainfo.xml"
+	"$(GUI_PYTHON)" packaging/install-launchers.py --prefix "$(PREFIX)" --destdir "$(DESTDIR)"
 
-install-all: install-gui  ## CLI + desktop app (what distro packages call)
+install-all: install-gui install-cli  ## Install both the desktop app and the CLI explicitly
 
-uninstall:  ## Remove the CLI
-	rm -f $(DESTDIR)$(PREFIX)/bin/neo
+uninstall-cli:  ## Remove only the command-line launcher
+	rm -f "$(DESTDIR)$(PREFIX)/bin/neo"
 
-uninstall-all: uninstall  ## Remove everything, including the desktop entry
-	rm -f $(DESTDIR)$(PREFIX)/bin/neo-gui
-	rm -rf $(DESTDIR)$(PREFIX)/share/neo
-	rm -f $(DESTDIR)$(PREFIX)/share/applications/dev.neofn.NeoLauncher.desktop
-	rm -f $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/dev.neofn.NeoLauncher.svg
-	rm -f $(DESTDIR)$(PREFIX)/share/metainfo/dev.neofn.NeoLauncher.metainfo.xml
+uninstall: uninstall-cli  ## Remove Neo's app files; keep games, sessions and settings
+	rm -f "$(DESTDIR)$(PREFIX)/bin/neo-gui"
+	# With the default prefix, share/neo also holds the user's session and cache.
+	# Remove only the installed Python package, never the whole data directory.
+	rm -rf "$(DESTDIR)$(PREFIX)/share/neo/neogui"
+	rm -f "$(DESTDIR)$(PREFIX)/share/neo/neo"
+	rm -f "$(DESTDIR)$(PREFIX)/share/applications/dev.neofn.NeoLauncher.desktop"
+	rm -f "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/dev.neofn.NeoLauncher.svg"
+	rm -f "$(DESTDIR)$(PREFIX)/share/metainfo/dev.neofn.NeoLauncher.metainfo.xml"
+
+uninstall-all: uninstall  ## Compatibility alias for uninstall
+
+appimage:  ## Build and smoke-test a portable x86-64 AppImage (see docs/appimage.md)
+	PYTHON="$(PYTHON)" packaging/build-appimage.sh
 
 clean:  ## Delete caches and build droppings
 	rm -rf __pycache__ .pytest_cache .ruff_cache build

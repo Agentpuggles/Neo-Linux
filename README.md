@@ -1,411 +1,145 @@
-![neo — a native Linux launcher for NeoFN](docs/assets/neo-banner.png)
+![Neo — a native Linux launcher for NeoFN](docs/assets/neo-banner.png)
 
-<p align="center">
-  <a href="https://github.com/Agentpuggles/Neo-Linux/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Agentpuggles/Neo-Linux/ci.yml?label=CI&logo=github&style=flat-square" alt="CI status"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license"></a>
-  <a href="#requirements"><img src="https://img.shields.io/badge/python-3.9%2B-informational?logo=python&logoColor=white&style=flat-square" alt="Python 3.9 or newer"></a>
-  <a href="CONTRIBUTING.md#ground-rules"><img src="https://img.shields.io/badge/dependencies-stdlib_only-green?style=flat-square" alt="No third-party dependencies"></a>
-  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/code_style-ruff-black?style=flat-square" alt="Linted with ruff"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/unofficial-orange?style=flat-square" alt="Unofficial tool"></a>
-</p>
+**Play [NeoFN](https://neofn.dev) on Linux, without memorising terminal commands.**
+Neo opens a native desktop app where you can sign in with Discord, download a
+Fortnite build and press **Play**. The game runs through
+[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) and Proton;
+the launcher itself does not need Wine.
 
-**A native Linux launcher for [NeoFN](https://neofn.dev)** — Discord login, chunked
-build downloads with hash verification, patched-client management and game launch, in
-one stdlib-only Python file. Nothing to build, nothing to `pip install`.
-
-The game itself runs through
-[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) / Proton. The
-launcher needs no Wine of its own.
-
-```
-login → pick build → manifest → parallel chunk download → zlib + SHA-1 verify
-      → assemble → per-file verify → prism-patched exe + 2 exchange codes → umu-run
-```
-
-> **Unofficial, interoperability-focused tool.** Not affiliated with or endorsed by
-> NeoFN or Epic Games. It talks only to NeoFN's own public services using the
-> credentials of their official launcher (extracted for compatibility, the same
-> approach [legendary](https://github.com/derrod/legendary) takes). No game assets are
-> included or redistributed. Using an unofficial launcher on a live service is a
-> judgement call each user makes — see [SECURITY.md](SECURITY.md).
-
-## Contents
-
-| Section | What it covers |
-| --- | --- |
-| [Status](#status) | what works, what is still gated on the service |
-| [Requirements](#requirements) | Python, umu-run, Wine prefix |
-| [Install](#install) | clone + one `install` command |
-| [Quick start](#quick-start) | first run to playing, six commands |
-| [Usage](#usage) | every command, flag by flag |
-| [Desktop app](#desktop-app) | the graphical launcher: install, features, packaging |
-| [Configuration](#configuration) | paths, settings, environment, disk usage |
-| [How it works](#how-it-works) | the pipeline, and where the protocol is documented |
-| [Repository layout](#repository-layout) | what lives where |
-| [Development](#development) | lint, tests, `make` targets |
-| [Documentation](#documentation) | protocol reference, engineering notes, changelog |
-| [Troubleshooting](#troubleshooting) | symptoms and fixes |
-| [Contributing](#contributing) | issues, pull requests, security reports |
-| [Acknowledgements](#acknowledgements) | the projects this stands on, and how this was written |
-| [License](#license) | MIT |
-
-## Status
-
-Current release: **v0.5.6**.
-
-> ### 🎉 NeoFN has launched — and `neo` plays it on Linux
->
-> **Matches played on Linux through this launcher on 2026-09-05**, start to
-> finish: `neo install` → `neo launch` (and the desktop app), Proton via umu-run,
-> into real games. The `PLAY` entitlement wall that every earlier release
-> documented is gone, so nothing here waits on the service any more.
->
-> Two things changed server-side on launch day, and `neo` v0.5.6 reads both
-> correctly — see [Troubleshooting](#troubleshooting) if an older build is
-> showing them as errors:
->
-> - the per-account gate `…/fortniteAccess` now answers **404** for accounts
->   that are not gated (it is an *open* gate, not a denial);
-> - **store entitlements stay empty unless you have bought something** — they
->   record purchases, never playtime.
-
-| Feature | State |
-| --- | --- |
-| Discord OAuth login (`neolauncher://` handler + manual fallback) | ✅ |
-| Session refresh, display-name setup, ban / access status | ✅ |
-| Build catalog + Epic BuildPatchServices manifest parsing | ✅ |
-| Parallel chunk downloader (16+ workers, resumable, SHA-1 per chunk **and** per file) | ✅ 411 files / 62,032 chunks / 61.9 GiB on 10.40 |
-| Install / verify / reinstall with a relocatable cache | ✅ |
-| Targeted repair — only broken files re-fetched (`neo verify --repair`) | ✅ |
-| Import an existing build folder, no re-download (`neo import`) | ✅ |
-| Access watch with desktop notification (`neo status --watch`) | ✅ exits straight away now that play is ungated |
-| Launcher news in the terminal (`neo news`) | ✅ |
-| Install-time disk preflight (cache + target checked before bytes move) | ✅ |
-| Friends roster + presence over XMPP (`neo friends`) | ✅ live-validated 2026-08-30 end to end: subprotocol, SASL PLAIN, bind, session, roster iq, presence echo |
-| Prism asset management (sha256-verified, auto-updated) | ✅ |
-| Launch via umu-run (exact Windows-launcher command line) | ✅ boots, auto-logs in |
-| Game modifiers (Edit On Release, Instant Reset, Disable Pre-Edit) | ✅ `-NeoModifiers=` JSON, same payload as the Windows Options panel |
-| Store / early-access entitlement visibility (`neo status`) | ✅ purchases only — an unbought account correctly shows none |
-| **Playing** | ✅ **matches played on Linux, 2026-09-05** |
-
-## Requirements
-
-| | |
-| --- | --- |
-| **Python** | ≥ 3.9, stdlib only — nothing to `pip install` |
-| **umu-run** | [`Open-Wine-Components/umu-launcher`](https://github.com/Open-Wine-Components/umu-launcher) plus any modern Proton |
-| **Disk** | the compressed build *and* the extracted build at peak — ~62 GiB → ~124 GiB for 10.40 |
-| **Wine prefix** | created on first run if you don't set `WINEPREFIX` — but do set it, see [Configuration](#configuration) |
-
-## Install
-
-```sh
-git clone https://github.com/Agentpuggles/Neo-Linux.git
-install -Dm755 Neo-Linux/neo ~/.local/bin/neo
-neo --version
-```
-
-`neo` is a single executable file; `install` is all the setup it needs. Make sure
-`~/.local/bin` is on your `PATH`, or call it by path.
-
-To run it straight from the checkout instead:
-
-```sh
-python3 ./neo --help
-```
-
-## Quick start
-
-```sh
-neo login                             # 1. Discord in your browser; callback is automatic
-neo setup YourName                    # 2. pick a display name (first run only)
-neo status                            # 3. service, bans, play access, players online
-
-neo install                           # 4. the live build (tens of GB)
-neo verify                            # 5. re-hash everything against the manifest
-
-export WINEPREFIX=~/prefixes/neofn    # 6. give the game its own prefix
-neo launch
-```
-
-Interrupted installs resume — re-run the same command and cached chunks are reused.
-
-## Usage
-
-```
-neo <command> [options]
-
-  account   login · whoami · setup · logout · status · news · friends
-  game      list · install · import · verify · uninstall · launch
-  system    cache · log · config               (see Configuration)
-```
-
-`neo help` (or `neo --help`) prints this same directory, grouped under `account` /
-`game` / `system`. Run `neo <command> --help` for a command's own options —
-`neo help <command>` and `neo <command> help` do the same thing.
-
-### Account
-
-| Command | What it does |
-| --- | --- |
-| `neo login` | Opens the Discord OAuth challenge in your browser and registers the `neolauncher://` handler, so the callback is handled automatically. Fallbacks: `neo login --callback '<url>'` with the full callback URL, or `neo login --code <CODE>`. |
-| `neo whoami` | Display name, account id and email for the current session. |
-| `neo setup [name]` | With no name: shows first-run setup status. With a name: checks availability, then sets the display name. |
-| `neo logout` | Drops the stored session (`auth.json` is emptied, not deleted). |
-| `neo status` | Lightswitch service status, ban status (both services), play access, store entitlements, players online. Play access has three answers: `granted`, `not granted`, or `open` — the last one meaning NeoFN no longer gates play per account (the endpoint 404s), which is what a launched service looks like. `--json` dumps the raw payloads behind the summary. `--watch` polls until access opens up and fires a desktop notification; `--interval N` sets the period (min 10 s). |
-| `neo news` | Launcher news from the content service (`--json` for the raw payload). |
-| `neo friends` | Roster with display names and live presence, speaking the official client's own XMPP-over-websocket protocol (protocol.md §12): SASL PLAIN with the account id + access token, official bind resource. `--wait N` presence window, `--verbose` prints the raw stanzas. Falls back to the friends REST API when the websocket is unreachable. `NEO_XMPP` overrides the endpoint. |
-
-### Game
-
-| Command | What it does |
-| --- | --- |
-| `neo list` | Every build in the catalog with size, release date and the `[LIVE]` marker. |
-| `neo install [version]` | Downloads and assembles a build. `version` is a substring such as `10.40`, or `live` (the default). Options: `-d DIR`, `-j WORKERS`, `--keep-cache`. Free space on both the cache and the target volume is checked first (engineering note 9); `--force` skips that check. |
-| `neo import <path> <version>` | Registers a build folder that already exists on disk (must contain `FortniteGame/` and `Engine/`) — no 62 GB re-download. Fetches the manifest so `verify` works, and marks the install as imported. |
-| `neo verify [version]` | Re-hashes every installed file against the stored manifest. `--repair` re-fetches only the chunks the broken files need and rebuilds just those files — a full reinstall is never needed for a few bad files. |
-| `neo uninstall [version]` | Removes an install: deletes the build folder (only if it still carries neo's `.neo-manifest.json`) and drops the state entry. Prompts unless `--yes`. |
-| `neo launch [version]` | Checks the gates (lightswitch, bans), refreshes prism assets, mints two exchange codes and runs the game through umu-run. Options: `--dry-run` (print the command line and stop), `--proton PROTON` (overrides the config `proton` for this launch; umu receives it as `PROTONPATH`), `--edit-on-release` / `--instant-reset` / `--disable-pre-edit` (and `--no-…` to override a config default for this launch — the Windows Options → Modifiers toggles, sent as `-NeoModifiers=`). The Proton defaults to the config `proton` setting, else your exported `PROTONPATH`, else umu's default. Extra UE4 arguments go last: `neo launch 10.40 -windowed` (options like `--dry-run` must come before them). |
-
-`version` defaults to the newest installed build (highest `CL-` number) for `verify`,
-`uninstall` and `launch`.
-
-### System
-
-| Command | What it does |
-| --- | --- |
-| `neo cache [stats\|clear]` | Size of the chunk/manifest caches, and cleanup. `clear` drops cached chunks (manifests stay unless `--all`). |
-| `neo log [-f] [-p PATH]` | Prints the game's `FortniteGame.log` from the Wine prefix (auto-located via `WINEPREFIX`), with login/entitlement/error lines highlighted. `-f` tails it live — the fastest way to watch the `PLAY` entitlement flip. |
-
-## Configuration
-
-### The `config` command
-
-| Command | What it does |
-| --- | --- |
-| `neo config` | Print every setting and the config file path. |
-| `neo config <key>` | Print one setting. |
-| `neo config <key> <value>` | Set a setting. Keys: `install_root`, `cache_dir`, `workers`, `proton`, `edit_on_release`, `instant_reset`, `disable_pre_edit`, `launch_options`. |
-
-### Files
-
-| Path | Contents |
-| --- | --- |
-| `~/.local/share/neo/auth.json` | Session tokens (mode `0600`) |
-| `~/.local/share/neo/state.json` | Installed builds → paths |
-| `~/.local/share/neo/prism/` | Prism-patched client binaries, sha256-checked on every launch |
-| `~/.local/share/neo/cache/` | Chunk and manifest cache |
-| `~/.config/neo/config.json` | Settings |
-
-### Settings
-
-| Key | Default | Also settable via |
-| --- | --- | --- |
-| `install_root` | `~/Games/Neo` | `neo install -d DIR` |
-| `cache_dir` | `~/.local/share/neo/cache` | `NEO_CACHE` |
-| `workers` | `16` | `neo install -j N` |
-| `proton` | *(umu's default)* | `PROTONPATH`, `neo launch --proton` |
-| `edit_on_release` | `false` | `neo launch --edit-on-release` |
-| `instant_reset` | `false` | `neo launch --instant-reset` |
-| `disable_pre_edit` | `false` | `neo launch --disable-pre-edit` |
-| `launch_options` | *(empty)* | extra args on `neo launch` (appended after these) |
-
-### Environment
-
-| Variable | Meaning |
-| --- | --- |
-| `NEO_HOME` | Override the data directory |
-| `NEO_CACHE` | Override the cache directory |
-| `NEO_UMU` | umu-run command to invoke (default `umu-run`) |
-| `WINEPREFIX` | Game prefix, honoured by umu-run — **set it**, otherwise umu uses `~/.wine` |
-| `PROTONPATH` | Proton umu should use (a name like `GE-Proton` or a path); read by umu. `neo` honours it, and `neo config proton <p>` / `neo launch --proton <p>` set it for the child |
-
-### Disk usage
-
-Peak during an install ≈ compressed build size (cache) + full build size (install
-directory), both checked before the download starts. The cache is purged on success
-unless you pass `--keep-cache`, which keeps it for offline repair at the cost of
-roughly one build's worth of disk. `neo cache stats` shows what is sitting there;
-`neo cache clear` reclaims it.
-
-## How it works
-
-```
- 1. login        Discord OAuth → neolauncher:// callback → access + refresh token
- 2. catalog      /launcher/api/public/builds → pick the live build
- 3. manifest     <dist>/<manifestPath> → Epic JSON manifest (~20 MB)
- 4. download     chunk GUIDs → N workers → Cloudflare R2, retries + backoff
- 5. verify       per chunk: header SHA-1 vs ChunkShaList; per file: SHA-1 vs FileHash
- 6. assemble     concatenate chunk slices, apply +x and symlinks, atomic rename
- 7. patch        prism assets → patched FortniteClient-Win64-Shipping.exe
- 8. launch       two exchange codes → umu-run → Proton → DX11
-```
-
-Every endpoint, the OAuth quirks (case-sensitive provider route, nonstandard
-`authorization_code` field), the manifest's fixed-width decimal numerics, the chunk URL
-scheme and on-disk format, the prism assets and the exact launch command line — with the
-pitfalls of running it through Wine — are written up in
-[docs/protocol.md](docs/protocol.md).
-
-## Repository layout
-
-```
-neo                          the launcher: one file, ~800 lines, stdlib only
-docs/
-  protocol.md                the wire format, validated against production
-  engineering-notes.md       every dead end, diagnosis and fix
-  assets/                    README banner and social-preview image
-tests/                       offline unit tests (stdlib unittest, no network)
-.github/
-  workflows/ci.yml           lint + Python 3.9→3.14 test matrix + docs checks
-  ISSUE_TEMPLATE/            bug report and feature-request forms
-  PULL_REQUEST_TEMPLATE.md   what a PR must show
-  dependabot.yml             keeps the actions current
-CHANGELOG.md                 release history and known issues
-CONTRIBUTING.md              how to change this safely
-SECURITY.md                  private reporting and scope
-Makefile  ruff.toml          the two commands CI runs, locally
-```
-
-## Development
-
-```sh
-make check     # ruff, the offline test suite, and a CLI smoke run — what CI runs
-make test      # python -m unittest discover -s tests -t .
-make lint-fix  # ruff, applying safe fixes
-make install   # install -Dm755 into ~/.local/bin
-```
-
-The suite is offline: it points `NEO_HOME`, `NEO_CACHE` and `XDG_CONFIG_HOME` at a
-temporary directory and stubs the HTTP layer, so it never touches your account, your
-cache or the network. What it cannot do is prove a live install works — `neo install`,
-`neo verify` and `neo launch --dry-run` on real hardware stay part of the pre-release
-checklist in [CONTRIBUTING.md](CONTRIBUTING.md#testing).
-
-## Desktop app
-
-Everything above is the command line. There is also **Neo**, a native desktop app
-built on the same code — the CLI is not shelled out to or reimplemented, it is
-imported, so a fix in one is a fix in both.
+> **Unofficial:** not affiliated with NeoFN or Epic Games. No game files are
+> bundled. You use your own NeoFN account and their services; see the
+> [security and account-risk notes](SECURITY.md).
 
 ![Neo desktop app](docs/assets/neo-gui.png)
 
-It is a real Qt application: a proper window with menus and dialogs, an app-menu
-entry and icon, dock/taskbar integration, desktop notifications, a tray icon, and
-`neolauncher://` sign-in handling. Dark and light themes follow your desktop's
-preference. It makes no assumptions about your desktop environment — the same
-build runs on KDE, GNOME, XFCE, Cinnamon, Hyprland, Sway and COSMIC, under both
-Wayland and X11.
+## Requirements
 
-**Requirements:** Python 3.9+ and PySide6. The CLI stays stdlib-only; Qt is
-needed only if you want the desktop app.
+| You need | Details |
+| --- | --- |
+| **Linux desktop** | Wayland or X11, with working graphics drivers |
+| **Python / Qt** | Bundled in the AppImage. Source installs need Python ≥ 3.9 and PySide6; the optional CLI needs host Python ≥ 3.9. |
+| **umu-launcher** | Provides `umu-run` to run the game through Proton; follow its [installation guide](https://github.com/Open-Wine-Components/umu-launcher#installation) |
+| **Free disk space** | About **124 GiB at peak** for build 10.40 (download cache + installed game), plus room for Proton and its runtime |
+
+## Install
+
+### AppImage
+
+A release AppImage bundles the desktop app, Python and Qt. Download it from
+[Releases](https://github.com/Agentpuggles/Neo-Linux/releases), mark it executable
+in your file manager and open it. You still need **umu-launcher** to play.
+See [AppImage setup](docs/appimage.md#download-and-run) for checksums and FUSE fixes.
+Until the first AppImage is published, use a workflow test build or install from source.
+
+### From source
+
+You will need Git and Make as well as Python. Install PySide6 using **one** command
+for your distro:
+
+| Distro | Command |
+| --- | --- |
+| Arch / CachyOS | `sudo pacman -S pyside6` |
+| Fedora | `sudo dnf install python3-pyside6` |
+| Debian / Ubuntu / Mint | `sudo apt install python3-pyside6.qtwidgets` |
+| openSUSE | `sudo zypper install python3-pyside6` |
+
+Package unavailable? Use the [virtualenv setup](docs/desktop-setup.md#virtualenv-setup)
+instead — no system-wide `pip install` needed.
+
+Then install Neo for your user account (**no sudo**):
 
 ```sh
-# Arch / CachyOS
-sudo pacman -S pyside6
-# Fedora
-sudo dnf install python3-pyside6
-# Debian / Ubuntu / Mint
-sudo apt install python3-pyside6.qtwidgets
-# openSUSE
-sudo zypper install python3-pyside6
-# anything else
-pip install --user PySide6
+git clone https://github.com/Agentpuggles/Neo-Linux.git
+cd Neo-Linux
+make install
+~/.local/bin/neo-gui
 ```
 
-```sh
-make install-all          # CLI + desktop app + .desktop entry + icon
-neo-gui                   # or launch "Neo" from your application menu
-```
+`make install` includes the GUI, its backend, app-menu entry and icon. Open
+**Neo** from your application menu after installation — no terminal is needed
+for everyday use.
 
-Run it straight from a checkout with `make run-gui`. To add the menu entry
-without installing system-wide: `neo-gui --install-desktop-entry`.
+On first launch, Neo offers **Install CLI (recommended)** or **Not now**. The
+command-line tool is **highly recommended for troubleshooting and doing tasks
+manually**, but entirely optional. You can install it later from
+**Settings → Command-line tool**; skipping it does not limit the GUI.
 
-| Page | What it does |
-| --- | --- |
-| **Play** | Status at a glance, the build you last used, and one button that installs, signs in or launches — whichever you actually need next. Live download and verify progress, recent activity, service news. |
-| **Library** | Every build you have installed and everything NeoFN publishes. Install, import an existing folder, verify, repair, remove. Per-build launch arguments, Proton build and prefix, and the gameplay modifiers. |
-| **Friends** | Your roster over XMPP, with a REST fallback when the socket is unavailable. |
-| **Diagnostics** | Neo's log, the game's log with follow-tail, your environment, and a one-click report that is redacted before it leaves the app. |
-| **Settings** | General, Appearance, Game, Launch, Network, Desktop integration and Advanced — the last hidden until you ask for it. |
-| **Account** | Sign in and out, session details, entitlements, display name. |
+## Start playing
 
-Settings are the same `config.json` the CLI reads, so changing your install root
-or Proton build in either place changes it in both.
+1. **Sign in with Discord** and approve the request in your browser. Choose a
+   display name if Neo asks for one.
+2. **Install the live build.** Pick a folder on a drive with enough space. Already
+   have the game files? Use **Library → Import folder** instead of downloading them again.
+3. **Press Play.** The first launch may take longer while umu prepares Proton and
+   its runtime.
 
-**Security.** Tokens are never written by the GUI — the CLI's `auth.json` (mode
-`0600`) remains the only store. Nothing is executed through a shell: launch
-arguments are parsed with `shlex` and passed as an argument vector. Every log
-pane, saved log and diagnostics report is passed through a redactor first, and
-the launch-command preview masks exchange codes. There is no bundled browser
-engine and no telemetry.
+Downloads resume after an interruption: start the same install again. If files
+are missing or damaged, use **Library → Verify & repair** rather than reinstalling.
 
-**Packaging.** `packaging/` has a `PKGBUILD` for the AUR, a Flatpak
-manifest, a `build-appimage.sh` for a portable build, and the freedesktop
-`.desktop`, icon and AppStream metainfo files that distro packages need.
-`make install-all` honours `DESTDIR` and `PREFIX`.
+In **Settings**, you can change the download location, Proton build, launch
+arguments and theme. **Library → Game modifiers** has gameplay modifiers such as
+Edit On Release, Instant Reset and Disable Pre-Edit. **Friends** shows your roster;
+**Diagnostics** has logs and a redacted report for troubleshooting.
 
-## Documentation
+## Status
 
-| Document | What's in it |
-| --- | --- |
-| [docs/gui-architecture.md](docs/gui-architecture.md) | How the desktop app is put together: why Qt Widgets, the layer boundaries, how it reuses the CLI without duplicating it, and the degradation and security rules it follows. |
-| [docs/protocol.md](docs/protocol.md) | The wire protocol: endpoints, auth quirks, manifest format, chunk URLs and file layout, prism, the launch recipe. Validated live against production. |
-| [docs/engineering-notes.md](docs/engineering-notes.md) | Every significant bug and dead end from building this, with the diagnosis that resolved it — including the ones that were our own fault. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history and known issues. |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Design constraints, dev setup, testing, PR and release conventions. |
-| [SECURITY.md](SECURITY.md) | What to report, how, privately, and what the in-tree OAuth client credentials are. |
+Current release: **v0.5.6**. Full matches were played on Linux with this launcher
+on **2026-09-05**, using umu/Proton. Compatibility still depends on NeoFN's services
+and your system. See the [changelog and known issues](CHANGELOG.md).
 
 ## Troubleshooting
 
-| Symptom | Fix |
+| Problem | Try this |
 | --- | --- |
-| `neo status` warns `fortniteAccess -> HTTP 404` | An older `neo` (≤ 0.5.5) treating the launched service as an error. Since launch that route is unpublished for ungated accounts; v0.5.6 prints `Play access : open` instead. Update, and see [protocol.md §11.2](docs/protocol.md#112-playability-gates). |
-| `Entitlements: none on file` although you play daily | Correct, and not a bug: entitlements record **store purchases** (early access, supporter tiers), never playtime. `neo status --json` shows the raw payload the store returned. |
-| `make run-gui` logs `Failed to register with host portal … App info not found for 'dev.neofn.NeoLauncher'` | Harmless Qt/xdg-desktop-portal chatter when the app runs from a checkout with no installed desktop entry. Silence it with `neo-gui --install-desktop-entry` (or `make install-all`). |
-| Login callback didn't fire | Copy the whole `neolauncher://callback/auth?code=…` URL from the address bar and pass it to `neo login --callback '<url>'`. Codes are single-use and expire quickly — when in doubt, `neo login` again. |
-| CDN returns 403 | R2 rejects some default user agents; `neo` sends its own. If you're behind a proxy or VPN, try without it. |
-| Chunk downloads fail with 404 | The CDN edge transiently 404s objects that exist; `neo` retries with backoff. A hard failure names the chunk GUID. |
-| Game shows an email / password screen | The login itself usually succeeded — check `neo status` for play access. Log: `<prefix>/drive_c/users/<user>/AppData/Local/FortniteGame/Saved/Logs/FortniteGame.log`. |
-| Game aborts instantly: `wine: … to unimplemented function …, aborting` | That Proton build is crashing before the game runs — a fresh prefix reproduces it, so it's not the prefix. Switch Proton and make it the default: `neo config proton GE-Proton`, then `neo launch` — [engineering notes §14](docs/engineering-notes.md#14-wine-unimplemented-function-abort--the-proton-build-not-the-prefix). `neo launch` prints these steps itself when it sees this. |
-| `Failed to open descriptor file` | A `-basedir` quoting problem. `neo` already passes it bare; don't add quotes yourself. |
-| Extra UE4 command-line arguments | Put neo options first, then extras: `neo launch --dry-run --edit-on-release -- -windowed`. Persist extras with `neo config launch_options "-windowed -log"`. |
-| Install filled the disk mid-download | Point the cache somewhere big: `neo config cache_dir /mnt/data/neo-cache`, or `NEO_CACHE=/mnt/data/neo-cache neo install`. Resume the same command. |
+| The browser does not return to Neo | Paste the full `neolauncher://…` callback URL into the sign-in dialog. Start sign-in again if the code expired. |
+| A download runs out of space | Choose a larger drive for **Download cache** or **Install location** in Settings, then retry. |
+| The game will not start | Check that `umu-run` is installed, then open **Diagnostics**. For an “unimplemented function” error, try **GE-Proton** in Settings → Launch. |
+| Neo will not open | Run `~/.local/bin/neo-gui` in a terminal to see the error, then check the [setup and startup fixes](docs/troubleshooting.md#desktop-startup). |
 
-## Contributing
+For more fixes, see [Troubleshooting](docs/troubleshooting.md). Still stuck?
+[Open an issue](https://github.com/Agentpuggles/Neo-Linux/issues/new/choose) with your
+distro, Neo version and a reviewed diagnostics report. **Never post session tokens
+or `auth.json`.** Report security issues [privately](SECURITY.md).
 
-Issues and pull requests are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md) for the constraints, the test expectations and the
-release checklist. The most useful contribution is usually a verified observation about
-the service, written up as a protocol note.
+## Prefer the terminal?
 
-- [New issue forms](https://github.com/Agentpuggles/Neo-Linux/issues/new/choose) ·
-  [existing issues](https://github.com/Agentpuggles/Neo-Linux/issues) ·
-  [CI](https://github.com/Agentpuggles/Neo-Linux/actions/workflows/ci.yml)
-- Security problems: [SECURITY.md](SECURITY.md), reported privately.
-- Behaviour here is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Once you install the optional CLI, all existing commands work without PySide6
+or a graphical session:
+
+```sh
+neo --help                 # list terminal commands; does not open the GUI
+neo status                 # service and account status
+neo verify --repair        # repair the newest installed build
+```
+
+For a terminal-only installation, use `make install-cli` instead of `make install`.
+The GUI and CLI share your account, installs and settings. With the CLI installed,
+`neo` without arguments opens the GUI when it is available.
+
+## More information
+
+| Guide | What it covers |
+| --- | --- |
+| [AppImage](docs/appimage.md) | Downloading, building, updates and release checks |
+| [Desktop setup](docs/desktop-setup.md) | Virtualenv alternative, updates, uninstalling and packaging |
+| [CLI reference](docs/cli-reference.md) | All commands, configuration, file paths and environment variables |
+| [Contributing](CONTRIBUTING.md) | Development setup, tests and pull requests |
+| [GUI architecture](docs/gui-architecture.md) | How the desktop app uses the shared backend |
+| [Protocol reference](docs/protocol.md) | Authentication, downloads and the launch protocol |
+| [Engineering notes](docs/engineering-notes.md) | Diagnoses and lessons from building Neo |
 
 ## Acknowledgements
 
-| Project | What it provided |
-| --- | --- |
-| [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) | the runner that actually starts the game under Proton |
-| [legendary](https://github.com/derrod/legendary) | the precedent for using Epic's own public client credentials for interop |
-| Epic's `BuildPatchServices` | the chunk and manifest formats this launcher reads, decompiled where the format was ambiguous |
-| [Cloudflare R2](https://developers.cloudflare.com/r2/) | the CDN behaviour (`403` on default user agents, transient `404`s) documented in [docs/protocol.md](docs/protocol.md#63-cdn-gotchas-cloudflare-r2) |
-| [ruff](https://docs.astral.sh/ruff/) | the single dev tool this repo needs |
+Built on [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher),
+Proton/Wine, Qt/PySide6 and Epic's BuildPatchServices formats, with interoperability
+precedent from [legendary](https://github.com/derrod/legendary) and linting by
+[ruff](https://docs.astral.sh/ruff/).
 
-**Authorship.** `neo` itself, and the rest of this repository — the protocol notes, the
-engineering log, the tests, the CI, this README — were written with substantial
-assistance from AI coding agents, directed by a human who ran every live install,
-supplied the Windows binaries that had to be decompiled, and decided what counted as
-working. The agents are tools; the copyright and the judgement calls are
-[Agentpuggles](https://github.com/Agentpuggles).
-
-Fortnite is a trademark of Epic Games, Inc. NeoFN is not affiliated with this project.
+This project was written with substantial AI assistance under
+[Agentpuggles](https://github.com/Agentpuggles)' direction and live testing.
+Human maintainers make the decisions and remain responsible for the project.
 
 ## License
 
-[MIT](LICENSE) — © 2026 Agentpuggles. The launcher is not affiliated with NeoFN or Epic
-Games. No game assets, client binaries or account data are distributed with it; anything
-`neo` downloads stays in your own data directory.
+[MIT](LICENSE) · © 2026 Agentpuggles. Fortnite is a trademark of Epic Games, Inc.
+Community participation follows our [Code of Conduct](CODE_OF_CONDUCT.md).
