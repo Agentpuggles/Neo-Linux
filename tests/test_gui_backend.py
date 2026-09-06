@@ -493,5 +493,68 @@ class TestLauncherLoader(unittest.TestCase):
         self.assertIn("-AUTH_PASSWORD=c1", argv)
 
 
+# -------------------------------------------------------------- service status
+class TestServiceStatus(ServiceTestCase):
+    """Status mapping, including the tri-state play gate (protocol.md §11.2)."""
+
+    def stub(self, *, access, logged_in=True, entitlements=None):
+        neo = self.neo
+        if logged_in:
+            self.service.auth().d = {
+                "account_id": "ACCOUNT", "access_token": "A", "refresh_token": "R",
+                "display_name": "n", "access_expires_at": None,
+            }
+
+        def fake_jhttp(method, url, body=None, headers=None, timeout=60):
+            if url.endswith("/token"):
+                return {"access_token": "T"}
+            if "lightswitch" in url:
+                return {"status": "UP", "message": "up", "banned": False,
+                        "allowedActions": ["PLAY"]}
+            if "ban-status" in url:
+                return {"banned": False}
+            if url.endswith("/fortniteAccess"):
+                if isinstance(access, Exception):
+                    raise access
+                return access
+            if "entitlements" in url:
+                return entitlements or {}
+            if "onlinecount" in url:
+                return {"fortnite": 240, "launcher": 402}
+            return {}
+
+        original = neo.jhttp
+        neo.jhttp = fake_jhttp
+        self.addCleanup(setattr, neo, "jhttp", original)
+        return self.service.service_status()
+
+    def test_a_retired_gate_is_open_and_never_blocks_play(self):
+        status = self.stub(access=self.neo.HttpError("GET", "https://x", 404, b""))
+        self.assertEqual(status.access_gate, "open")
+        self.assertTrue(status.access_ok)
+        self.assertFalse(status.access_denied)
+        self.assertEqual(status.access_label, "Open")
+        self.assertEqual(status.access_tone, "success")
+
+    def test_granted_and_denied_still_map_through(self):
+        self.assertEqual(self.stub(access=True).access_gate, "granted")
+        denied = self.stub(access=False)
+        self.assertEqual(denied.access_gate, "denied")
+        self.assertTrue(denied.access_denied)
+
+    def test_an_unreadable_gate_is_unknown_and_not_a_denial(self):
+        status = self.stub(access=self.neo.HttpError("GET", "https://x", 500, b""))
+        self.assertEqual(status.access_gate, "unknown")
+        self.assertFalse(status.access_denied)
+        self.assertFalse(status.access_ok)
+
+    def test_signed_out_leaves_the_gate_unknown(self):
+        status = self.stub(access=True, logged_in=False)
+        self.assertEqual(status.access_gate, "unknown")
+
+    def test_players_online_prefers_the_game_over_the_launcher(self):
+        self.assertEqual(self.stub(access=True).players_online, 240)
+
+
 if __name__ == "__main__":
     unittest.main()

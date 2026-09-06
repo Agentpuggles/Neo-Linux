@@ -10,7 +10,7 @@
 #   neo login                 Discord login (browser; neolauncher:// handler)
 #   neo whoami / logout       account info / drop session
 #   neo setup [name]          first-run display name
-#   neo status [--watch]      service status + access/entitlements (--watch: wait)
+#   neo status [--watch]      service status + access/entitlements (--json: raw)
 #   neo news                  launcher news from the content service
 #   neo list                  available builds
 #   neo config [k] [v]        settings: install_root, cache_dir, workers, proton,
@@ -55,7 +55,7 @@ import urllib.request
 import xml.etree.ElementTree
 import zlib
 
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 UA = f"neo-linux/{VERSION}"
 
 # ---------------------------------------------------------------- constants
@@ -186,10 +186,32 @@ def http(method, url, body=None, headers=None, timeout=60, retries=3):
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"{method} {url} failed: {last}")
 
+class HttpError(RuntimeError):
+    """A non-2xx response, with the status kept so callers can branch on it.
+
+    The message is byte-for-byte the one the plain RuntimeError used to carry,
+    so anything that only prints the exception is unaffected.
+    """
+    def __init__(self, method, url, status, body=b""):
+        self.method, self.url, self.status, self.body = method, url, status, bytes(body)
+        super().__init__(f"{method} {url} -> HTTP {status}: "
+                         f"{self.body[:200].decode('utf-8', 'replace')}")
+
+def http_status(exc):
+    """The HTTP status behind an exception, when there is one (else None).
+
+    Prefers the structured HttpError; falls back to reading the status out of
+    the message, so a wrapped or re-raised error still answers correctly.
+    """
+    if isinstance(exc, HttpError):
+        return exc.status
+    m = re.search(r"HTTP (\d{3})\b", str(exc))
+    return int(m.group(1)) if m else None
+
 def jhttp(method, url, body=None, headers=None, timeout=60):
     status, raw = http(method, url, body, headers, timeout)
     if status >= 400:
-        raise RuntimeError(f"{method} {url} -> HTTP {status}: {raw[:200].decode('utf-8','replace')}")
+        raise HttpError(method, url, status, raw)
     return json.loads(raw or b"{}")
 
 def basic_auth():
@@ -295,15 +317,46 @@ def store_entitlements(auth):
     return jhttp("GET", STORE + "/entitlements/" + auth.d["account_id"],
                  headers={"Authorization": "Bearer " + auth.access()})
 
+ENTITLEMENT_KEYS = ("ownedofferids", "owned_offer_ids", "orders", "subscriptions")
+NO_ENTITLEMENTS = "none on file"
+# entitlements are *purchases* (early access, supporter tiers) — playing the game
+# never creates one, so an empty payload on a played account is normal, not a bug.
+ENTITLEMENT_NOTE = "store purchases only — playing the game does not create any"
+
+def unwrap_entitlements(ent):
+    """Peel the one-key envelopes the store has been seen to wrap payloads in."""
+    for _ in range(3):
+        if not isinstance(ent, dict):
+            break
+        if any(k.lower() in ENTITLEMENT_KEYS for k in ent):
+            break
+        inner = first_of(ent, "data", "result", "entitlements", "account")
+        if not isinstance(inner, (dict, list)):
+            break
+        ent = inner
+    return ent
+
 def describe_entitlements(ent):
     """One-line summary of the store entitlements payload (§11.3).
 
     Field names come from the official client's DTOs, which parse
-    case-insensitively; tolerate both spellings and anything unexpected.
+    case-insensitively; tolerate both spellings, a bare array of entitlement
+    objects, and a wrapped payload. An unrecognised *non-empty* shape reports
+    its keys rather than claiming the account owns nothing — "none on file"
+    should only ever mean the server really said so.
     """
+    ent = unwrap_entitlements(ent)
+    if isinstance(ent, list):
+        if not ent:
+            return NO_ENTITLEMENTS
+        ids = [str(first_of(e, "offerId", "offer_id", "id", "name"))
+               for e in ent if isinstance(e, dict)]
+        ids = [i for i in ids if i and i != "None"]
+        return (f"{len(ent)} entitlement(s)"
+                + (": " + ", ".join(ids[:6]) if ids else ""))
     if not isinstance(ent, dict):
         return str(ent)[:120]
-    offers = ent.get("ownedOfferIds") or ent.get("owned_offer_ids") or []
+    offers = first_of(ent, "ownedOfferIds", "owned_offer_ids") or []
     orders = ent.get("orders") or []
     subs = ent.get("subscriptions") or []
     paid = [o for o in orders if isinstance(o, dict)
@@ -312,11 +365,60 @@ def describe_entitlements(ent):
     if offers: bits.append("offers " + ", ".join(str(o) for o in offers))
     if orders: bits.append(f"{len(paid)}/{len(orders)} orders paid")
     if subs:   bits.append(f"{len(subs)} subscription(s)")
-    return "; ".join(bits) if bits else "none on file"
+    if bits:
+        return "; ".join(bits)
+    if ent and not any(k.lower() in ENTITLEMENT_KEYS for k in ent):
+        return "unrecognised payload (keys: " + ", ".join(sorted(map(str, ent))[:6]) + ")"
+    return NO_ENTITLEMENTS
+
+# ---- the per-account play gate (§11.2) ----------------------------------
+# Three answers, not two. Since the public launch the account service has
+# stopped publishing the gate for ungated accounts and answers 404 — that is
+# neither an error nor a denial, so it gets its own state instead of a scary
+# warning next to an account that plays fine.
+ACCESS_GRANTED, ACCESS_DENIED, ACCESS_OPEN, ACCESS_UNKNOWN = (
+    "granted", "denied", "open", "unknown")
+ACCESS_TEXT = {
+    ACCESS_GRANTED: "granted",
+    ACCESS_DENIED:  "not granted — NeoFN has not enabled play for this account",
+    ACCESS_OPEN:    "open — the service no longer gates play per account "
+                    "(the gate answers 404)",
+    ACCESS_UNKNOWN: "unknown",
+}
 
 def fortnite_access(auth):
     return jhttp("GET", ACCOUNT + "/api/public/account/" + auth.d["account_id"]
                  + "/fortniteAccess", headers={"Authorization": "Bearer " + auth.access()})
+
+def fortnite_access_state(auth):
+    """(state, raw payload) for the play gate — granted / denied / open.
+
+    Anything other than a 404 propagates: a 401 or a 500 means we do not know,
+    and pretending otherwise would be worse than saying so.
+    """
+    try:
+        payload = fortnite_access(auth)
+    except Exception as exc:
+        if http_status(exc) == 404:
+            return ACCESS_OPEN, None
+        raise
+    return (ACCESS_GRANTED if payload else ACCESS_DENIED), payload
+
+def playable_access(state):
+    """Does this gate state allow launching? Only an explicit denial does not."""
+    return state in (ACCESS_GRANTED, ACCESS_OPEN)
+
+def format_online_count(oc):
+    """The online-count payload is a per-service map; render it as a line."""
+    if isinstance(oc, dict):
+        counts = {k: v for k, v in oc.items() if isinstance(v, int)}
+        if not counts:
+            return str(oc)[:120]
+        line = " · ".join(f"{k} {v:,}" for k, v in sorted(counts.items()))
+        return line + (f" (total {sum(counts.values()):,})" if len(counts) > 1 else "")
+    if isinstance(oc, int):
+        return f"{oc:,}"
+    return str(oc)[:120]
 
 def get_news():
     # content service, no auth; the official client reads both shapes (§1)
@@ -1078,26 +1180,42 @@ def cmd_login(args):
     webbrowser.open(CHALLENGE)
 
 def cmd_status(args, auth):
+    raw = {}
     ls = lightswitch(auth)
+    raw["lightswitch"] = ls
     col = C("32", "UP") if ls.get("status") == "UP" else C("31", ls.get("status", "?"))
     print(f"Fortnite service : {col}  {ls.get('message','')}")
     print(f"Banned           : {'yes — ' + str(ls.get('banReason')) if ls.get('banned') else 'no'}")
-    print(f"Allowed actions  : {ls.get('allowedActions') or '—'}")
+    actions = ls.get("allowedActions")
+    if isinstance(actions, list):
+        actions = ", ".join(str(a) for a in actions)
+    print(f"Allowed actions  : {actions or '—'}")
     if auth.logged_in:
         try:
             b = prism_ban(auth)
+            raw["prismBan"] = b
             print(f"Prism ban        : {'yes — ' + str(b.get('reason')) if b.get('banned') else 'no'}")
         except Exception as e: warn(f"prism: {e}")
         try:
-            print(f"Fortnite access  : {fortnite_access(auth)}")
+            state, payload = fortnite_access_state(auth)
+            raw["fortniteAccess"] = payload
+            print(f"Play access      : {ACCESS_TEXT[state]}")
         except Exception as e: warn(f"fortniteAccess: {e}")
         try:
-            print("Entitlements     :", describe_entitlements(store_entitlements(auth)))
+            ent = store_entitlements(auth)
+            raw["entitlements"] = ent
+            summary = describe_entitlements(ent)
+            print("Entitlements     :", summary)
+            if summary == NO_ENTITLEMENTS:
+                print(f"                   ({ENTITLEMENT_NOTE})")
         except Exception as e: warn(f"store entitlements: {e}")
     try:
         oc = jhttp("GET", LAUNCHER + "/api/public/onlinecount")
-        print(f"Players online   : {oc}")
+        raw["onlineCount"] = oc
+        print(f"Players online   : {format_online_count(oc)}")
     except Exception: pass
+    if getattr(args, "json", False):
+        print(json.dumps(raw, indent=1, default=str))
     if getattr(args, "watch", False):
         if not auth.logged_in:
             err("--watch needs a logged-in account (fortniteAccess is per-account)")
@@ -1107,16 +1225,21 @@ def cmd_status(args, auth):
         while True:
             stamp = datetime.now().strftime("%H:%M:%S")
             try:
-                granted = fortnite_access(auth)
+                state, granted = fortnite_access_state(auth)
             except Exception as e:
-                granted = None
+                state, granted = ACCESS_UNKNOWN, None
                 warn(f"[{stamp}] fortniteAccess unreachable ({e})")
-            if granted:
+            if state == ACCESS_OPEN:
+                ok(f"[{stamp}] fortniteAccess: {ACCESS_TEXT[state]} — nothing to wait for, "
+                   "run: neo launch")
+                notify("Neo access open", "Play is no longer account-gated — run: neo launch")
+                return
+            if state == ACCESS_GRANTED:
                 ok(f"[{stamp}] fortniteAccess: granted — run: neo launch")
                 notify("Neo access granted", "fortniteAccess flipped to true — run: neo launch")
                 return
             print(f"[{stamp}] fortniteAccess: "
-                  f"{granted if granted is not None else 'unreachable'}", flush=True)
+                  f"{granted if state != ACCESS_UNKNOWN else 'unreachable'}", flush=True)
             time.sleep(interval)
 
 def cmd_news(args):
@@ -1631,9 +1754,12 @@ def make_parser():
     add("logout")
     s = add("status")
     s.add_argument("--watch", action="store_true",
-                   help="keep polling until fortniteAccess is granted, then notify and exit")
+                   help="keep polling until play access is granted (or the gate is "
+                        "no longer published), then notify and exit")
     s.add_argument("--interval", type=int, default=60, metavar="SECS",
                    help="poll period in seconds (min 10)")
+    s.add_argument("--json", action="store_true",
+                   help="dump the raw service payloads after the summary")
     s = add("news"); s.add_argument("--json", action="store_true",
                                     help="dump the raw payload")
     add("list")

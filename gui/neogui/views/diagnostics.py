@@ -404,15 +404,18 @@ class DiagnosticsView(View):
                 "" if playable else "Install a build from the Library.",
             )
         )
-        access = s.status.fortnite_access
+        status = s.status
         out.append(
             (
-                access is True,
+                status.access_ok,
                 "Account has game access",
                 ""
-                if access
-                else "NeoFN has not granted this account play access yet — this is "
-                "expected during private testing.",
+                if status.access_ok
+                else (
+                    "NeoFN has not enabled play for this account."
+                    if status.access_denied
+                    else "Could not read the play gate — sign in and refresh status."
+                ),
             )
         )
         prefix = os.environ.get("WINEPREFIX")
