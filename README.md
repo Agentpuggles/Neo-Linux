@@ -83,7 +83,7 @@ Edit On Release, Instant Reset and Disable Pre-Edit. **Friends** shows your rost
 
 ## Status
 
-Current release: **v0.5.6**. Full matches were played on Linux with this launcher
+Current release: **v0.6.0**. Full matches were played on Linux with this launcher
 on **2026-09-05**, using umu/Proton. Compatibility still depends on NeoFN's services
 and your system. See the [changelog and known issues](CHANGELOG.md).
 

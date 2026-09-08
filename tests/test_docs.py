@@ -2,11 +2,14 @@
 
 Everything here is a plain-text check on the repo's own markdown — no network, no
 markdown tooling. It exists because a README that promises `docs/protocol.md §8.1`
-or a version number in three places goes stale the moment anyone edits one of them.
+or a version number in four places goes stale the moment anyone edits one of them.
+The fourth place is the AppStream metainfo, which is what a software centre shows
+next to the app's name.
 """
 
 import re
 import unittest
+import xml.etree.ElementTree
 
 from tests import support
 from tests.support import neo
@@ -163,6 +166,26 @@ class TestVersionDrift(unittest.TestCase):
         self.assertTrue(
             re.search(r"^## \[Unreleased\]", text, re.M),
             "Keep a Changelog wants an Unreleased section for work in flight",
+        )
+
+    def test_appstream_metainfo_announces_the_same_version(self):
+        """A software centre reads <releases>, not `neo --version`.
+
+        `packaging/appimage.py` rewrites this block from VERSION at build time, so
+        only source installs can drift — and a stale entry advertises a version the
+        project never shipped.
+        """
+        paths = sorted((ROOT / "packaging").glob("*.metainfo.xml"))
+        self.assertEqual(len(paths), 1, "expected exactly one AppStream metainfo file")
+        root = xml.etree.ElementTree.parse(paths[0]).getroot()
+        releases = root.find("releases")
+        self.assertIsNotNone(releases, f"{paths[0].name} has no <releases> block")
+        versions = [release.get("version") for release in releases.findall("release")]
+        self.assertTrue(versions, f"{paths[0].name} lists no <release> entries")
+        self.assertEqual(
+            versions[0],
+            neo.VERSION,
+            f"{paths[0].name} announces {versions[0]} but the launcher reports {neo.VERSION}",
         )
 
     def test_ci_matrix_covers_the_python_the_readme_promises(self):

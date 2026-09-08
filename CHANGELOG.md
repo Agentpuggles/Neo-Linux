@@ -5,11 +5,18 @@ All notable changes to `neo` are documented here, newest first. The format follo
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) with `0.x` meaning
 "works, but the interfaces may still move".
 
-> No git tags exist yet, so release headings are text rather than links to a diff.
-> Once releases are tagged, add a `[X.Y.Z]: …/compare/vPREV...vX.Y.Z` definition per
-> entry (see [CONTRIBUTING.md → Releasing](CONTRIBUTING.md#releasing)).
+> `v0.6.0` is the first tagged release, so its heading links to the tag rather than to
+> a `vPREV...vX.Y.Z` diff — there is no earlier tag to compare against. Every release
+> after it gets a compare link (see [CONTRIBUTING.md → Releasing](CONTRIBUTING.md#releasing)).
 
 ## [Unreleased]
+
+## [0.6.0] — 2026-09-08
+
+**The first tagged, publicly downloadable release: Neo, a native Linux desktop app
+for the launcher**, plus the AppImage that ships it. Validated with `make check`
+(ruff + the offline suite + CLI smoke) and `make check-gui` (the Qt tests + the
+desktop self-check).
 
 ### Packaging
 
@@ -27,10 +34,6 @@ All notable changes to `neo` are documented here, newest first. The format follo
   browsers and desktop utilities. The AppImage never injects its bin folder into
   the host PATH. Self-checks block network access and leave live-instance sockets
   alone; the optional CLI remains genuinely optional inside the bundle.
-
-Repository hygiene and a test suite, a self-diagnosing launch failure, and **Neo**, a
-native desktop app for the launcher. Validated with `make check` (ruff + the offline
-suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
 
 ### Added
 
@@ -131,6 +134,9 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
   into `.venv`. They now prefer `.venv/bin/python` and fall back to a distro-packaged
   PySide6, with a clear message instead of a traceback. The CLI targets are unchanged.
 
+- The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
+  existed (no tags in this repository).
+
 ### Changed
 
 - **The GUI now offers an optional CLI installation.** The first normal launch
@@ -202,10 +208,17 @@ suite + CLI smoke) and `make check-gui` (the Qt tests + the desktop self-check).
   `docs/engineering-notes.md`) now record that `neo` and this repository were written
   with substantial AI assistance under human direction.
 
-### Fixed
+### Removed
 
-- The `0.2.0` changelog entry linked a `v0.1.0...v0.2.0` compare diff that never
-  existed (no tags in this repository).
+- **The Windows launcher reference copy is out of the repository.** The tree carried
+  `original-windows-launcher/` — 619 files, about 499 MB of third-party copyrighted
+  binaries: `NeoLauncher.exe` and `NeoLauncher.dll`, Epic's `BuildPatchServices.dll`,
+  Microsoft's Windows App SDK / DirectML / ONNX redistributables, and NeoFN's own
+  trailer and background media. Neo's MIT licence never covered those files, and no
+  build, test or release step read them — the protocol facts they yielded are written
+  up in `docs/protocol.md`, which is what a reviewer needs. The path is now in
+  `.gitignore`, so a local reference copy cannot be committed by accident. See
+  [CONTRIBUTING.md → The Windows reference copy](CONTRIBUTING.md#the-windows-reference-copy).
 
 ## [0.5.6] — 2026-09-05
 
@@ -508,3 +521,6 @@ Internal first cut; never released, so no tag or diff exists for it.
   'dev.neofn.NeoLauncher'`. It is xdg-desktop-portal noticing there is no
   installed desktop entry for the app id; it affects nothing. Install the entry
   (`neo-gui --install-desktop-entry`, or `make install-all`) to silence it.
+
+[Unreleased]: https://github.com/Agentpuggles/Neo-Linux/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Agentpuggles/Neo-Linux/releases/tag/v0.6.0

@@ -20,7 +20,14 @@
       <li>Dark and light themes that follow your desktop</li>
     </ul>
   </description>
+  <developer_name>Agentpuggles</developer_name>
   <launchable type="desktop-id">dev.neofn.NeoLauncher.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Neo's Play page, signed in and ready to launch a build</caption>
+      <image>https://raw.githubusercontent.com/Agentpuggles/Neo-Linux/main/docs/assets/neo-gui.png</image>
+    </screenshot>
+  </screenshots>
   <categories>
     <category>Game</category>
   </categories>
@@ -31,8 +38,14 @@
     <binary>neo-gui</binary>
   </provides>
   <releases>
-    <release version="1.0.0" date="2026-09-04">
-      <description><p>First release of the desktop app.</p></description>
+    <release version="0.6.0" date="2026-09-08">
+      <description>
+        <p>
+          First tagged release: the desktop app is the default way to use Neo, the
+          command-line tool is an optional install offered on first launch, and a
+          portable AppImage is published alongside the release.
+        </p>
+      </description>
     </release>
   </releases>
 </component>
