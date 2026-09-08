@@ -13,6 +13,13 @@ NEO_HOME/
 *.log
 neo-install-*/
 
+# The official NeoFN Windows launcher, kept locally as protocol reference only.
+# It is third-party copyrighted software (NeoLauncher.exe, Epic's
+# BuildPatchServices.dll, Microsoft redistributables, NeoFN media) that this
+# project has no right to redistribute, so it must never be committed.
+# See CONTRIBUTING.md → The Windows reference copy.
+original-windows-launcher/
+
 # Editor and OS droppings
 .idea/
 .vscode/

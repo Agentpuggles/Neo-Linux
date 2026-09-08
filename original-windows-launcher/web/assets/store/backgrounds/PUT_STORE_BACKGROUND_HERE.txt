@@ -1,4 +1,0 @@
-Store background paths supported:
-WebUI/public/assets/store/backgrounds/store-page.png
-WebUI/public/assets/store/backgrounds/store-page.jpg
-WebUI/public/assets/store/backgrounds/store-page.webp
