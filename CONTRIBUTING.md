@@ -90,6 +90,22 @@ ruff.toml                    lint config (see the comment about the dense style)
 Makefile                     the shortcuts above
 ```
 
+### The Windows reference copy
+
+Protocol work is validated against the official NeoFN Windows launcher
+(NeoLauncher 1.0.7). A copy of it is **not** part of this repository and never
+should be: it is third-party copyrighted software — `NeoLauncher.exe` and
+`NeoLauncher.dll`, Epic's `BuildPatchServices.dll`, Microsoft's Windows App SDK /
+DirectML / ONNX redistributables and NeoFN's own trailer and background media —
+and redistributing it is not ours to licence. Neo's MIT licence covers Neo's own
+source only.
+
+If you are doing protocol work, keep your copy in `original-windows-launcher/`
+at the top of the checkout; that path is in `.gitignore`, so `git status` stays
+clean and it cannot be committed by accident. Nothing in the build, the tests or
+the release reads it — the facts taken from it are written down in
+`docs/protocol.md` instead, which is what a reviewer needs.
+
 ## Making a change
 
 - **Style.** Ruff enforces everything except line-per-statement density: `neo`

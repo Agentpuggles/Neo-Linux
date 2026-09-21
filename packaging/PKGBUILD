@@ -1,6 +1,6 @@
 # Maintainer: Neo Linux <https://github.com/Agentpuggles/Neo-Linux>
 pkgname=neo-linux
-pkgver=1.0.0
+pkgver=0.6.0
 pkgrel=1
 pkgdesc="Native Linux desktop launcher for NeoFN, with optional CLI usage"
 arch=('any')

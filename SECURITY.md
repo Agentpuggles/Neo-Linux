@@ -62,8 +62,8 @@ available, since a description of the hole is itself exploitable until then.
 
 | Version | Supported |
 | --- | --- |
-| `0.2.x` | ✅ |
-| `< 0.2` | ⚠️ best effort — please reproduce on `0.2.x` first |
+| `0.6.x` | ✅ |
+| `< 0.6` | ⚠️ best effort — please reproduce on `0.6.x` first |
 
 After updating for a session-handling issue, re-login (`neo logout && neo login`): a
 stolen refresh token stays valid until the account service revokes it, and rotating it

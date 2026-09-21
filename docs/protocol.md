@@ -481,6 +481,11 @@ on-disk Velopack layout (`Update.exe`, `current/`, `packages/`). Answers the
 two questions the wire format alone cannot: *how does the launcher update, and
 what decides who is allowed to play?*
 
+That launcher is third-party copyrighted software and is **not** distributed here:
+this section is the record of what was read out of it, so nobody needs a copy to
+review or reproduce Neo's behaviour. See
+[CONTRIBUTING.md → The Windows reference copy](../CONTRIBUTING.md#the-windows-reference-copy).
+
 ### 11.1 Self-update (Velopack)
 
 ```http
